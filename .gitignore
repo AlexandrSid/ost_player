@@ -1,0 +1,4 @@
+.cursor/
+.github/
+app/target/
+configure-agents.md
