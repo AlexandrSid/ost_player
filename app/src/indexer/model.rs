@@ -76,6 +76,10 @@ pub struct ScanOptions {
     pub min_size_bytes: u64,
     /// If canonicalization fails, optionally deduplicate by (root identity, rel_path, size_bytes).
     pub allow_name_size_fallback_dedup: bool,
+    /// Test-only switch to force `canonicalize()` to behave as if it failed.
+    ///
+    /// This avoids relying on process-global environment variables (tests run in parallel).
+    pub force_canonicalize_fail: bool,
 }
 
 impl ScanOptions {
@@ -92,6 +96,7 @@ impl ScanOptions {
             supported_extensions: exts,
             min_size_bytes: self.min_size_bytes,
             allow_name_size_fallback_dedup: self.allow_name_size_fallback_dedup,
+            force_canonicalize_fail: self.force_canonicalize_fail,
         }
     }
 }

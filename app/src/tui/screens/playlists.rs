@@ -159,7 +159,7 @@ impl PlaylistsScreen {
         }
     }
 
-    pub fn view<'a>(&self, state: &'a AppState) -> PlaylistsView<'a> {
+    pub fn view<'a>(&'a self, state: &'a AppState) -> PlaylistsView<'a> {
         PlaylistsView {
             create_input: self.create_input.as_ref(),
             rename_input: self.rename_input.as_ref().map(|(_, i)| i),

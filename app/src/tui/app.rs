@@ -316,6 +316,7 @@ impl TuiApp {
                         supported_extensions: self.state.cfg.settings.supported_extensions.clone(),
                         min_size_bytes: self.state.cfg.settings.min_size_bytes,
                         allow_name_size_fallback_dedup: true,
+                        force_canonicalize_fail: false,
                     },
                     origin: ScanOrigin::RescanLibrary,
                 };
@@ -409,6 +410,7 @@ impl TuiApp {
                             supported_extensions: self.state.cfg.settings.supported_extensions.clone(),
                             min_size_bytes: self.state.cfg.settings.min_size_bytes,
                             allow_name_size_fallback_dedup: true,
+                            force_canonicalize_fail: false,
                         },
                         origin: ScanOrigin::LoadPlaylist { stopped_playback },
                     };
@@ -604,6 +606,7 @@ mod tests {
     use crate::player::PlaybackStatus;
     use crate::playlists::{Playlist, PlaylistsFile};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::cell::RefCell;
     use std::fs;
 
     #[derive(Default)]
@@ -924,11 +927,19 @@ mod tests {
         cfg.folders = vec!["X".to_string()];
         cfg.settings.repeat = RepeatMode::Off;
 
+        // Create real folders so the indexer doesn't report MissingFolder issues.
+        let a_dir = td.path().join("A");
+        let b_dir = td.path().join("B");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+        let a = a_dir.to_string_lossy().to_string();
+        let b = b_dir.to_string_lossy().to_string();
+
         let mut pls = PlaylistsFile::default();
         pls.playlists.push(Playlist {
             id: "p1".to_string(),
             name: "One".to_string(),
-            folders: vec!["A".to_string(), "A".to_string(), "B".to_string()],
+            folders: vec![a.clone(), a, b],
             extra: Default::default(),
         });
         let (mut app, mock) = app_with_mock(paths, cfg, pls);
@@ -936,7 +947,7 @@ mod tests {
         app.apply(Action::LoadPlaylist { idx: 0 }).unwrap();
 
         // folders swapped + normalized (dedup keep order)
-        assert_eq!(app.state.cfg.folders, vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(app.state.cfg.folders, vec![a_dir.to_string_lossy().to_string(), b_dir.to_string_lossy().to_string()]);
         assert_eq!(app.state.playlists.active.as_deref(), Some("p1"));
         assert_eq!(mock.config_writes(), 1);
         assert_eq!(mock.playlists_writes(), 1);

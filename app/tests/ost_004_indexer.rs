@@ -38,23 +38,7 @@ fn default_scan_options() -> ScanOptions {
         supported_extensions: vec!["mp3".to_string(), "ogg".to_string()],
         min_size_bytes: 0,
         allow_name_size_fallback_dedup: false,
-    }
-}
-
-struct EnvVarGuard {
-    key: &'static str,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        std::env::set_var(key, value);
-        Self { key }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        std::env::remove_var(self.key);
+        force_canonicalize_fail: false,
     }
 }
 
@@ -202,8 +186,6 @@ fn scan_sort_is_total_and_deterministic_when_rel_path_ties() {
 
 #[test]
 fn scan_fallback_dedup_does_not_collide_across_roots() {
-    let _guard = EnvVarGuard::set("OST_PLAYER_TEST_FORCE_CANONICALIZE_FAIL", "1");
-
     let dir = tempdir().unwrap();
     let root_a = dir.path().join("music_a");
     let root_b = dir.path().join("music_b");
@@ -216,6 +198,7 @@ fn scan_fallback_dedup_does_not_collide_across_roots() {
 
     let mut options = default_scan_options();
     options.allow_name_size_fallback_dedup = true;
+    options.force_canonicalize_fail = true;
 
     let idx = scan_library(
         &[

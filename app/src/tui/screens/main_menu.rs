@@ -80,7 +80,7 @@ impl MainMenuScreen {
         }
     }
 
-    pub fn view<'a>(&self, state: &'a AppState) -> MainMenuView<'a> {
+    pub fn view<'a>(&'a self, state: &'a AppState) -> MainMenuView<'a> {
         MainMenuView {
             add_folder: self.add_folder.as_ref(),
             confirm_remove: self.confirm_remove.as_ref(),

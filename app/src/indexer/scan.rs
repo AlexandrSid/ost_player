@@ -5,6 +5,50 @@ use std::collections::{BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use serde_json;
+
+// #region agent log
+#[allow(dead_code)]
+fn agent_debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_yaml::Value) {
+    // Enable only when explicitly requested to keep normal runs clean.
+    if std::env::var_os("OST_PLAYER_DEBUG_DEDUP").is_none() {
+        return;
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let payload = serde_yaml::Value::Mapping({
+        let mut m = serde_yaml::Mapping::new();
+        m.insert("sessionId".into(), "9686b3".into());
+        m.insert("runId".into(), "dedup-test".into());
+        m.insert("hypothesisId".into(), hypothesis_id.into());
+        m.insert("location".into(), location.into());
+        m.insert("message".into(), message.into());
+        m.insert("timestamp".into(), ts.into());
+        m.insert("data".into(), data);
+        m
+    });
+
+    // Write to workspace root debug log (one level above app/).
+    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("debug-9686b3.log");
+
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        if let Ok(line) = serde_json::to_string(&payload) {
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+            let _ = std::io::Write::write_all(&mut f, b"\n");
+        }
+    }
+}
+// #endregion agent log
 
 pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
     let options = options.normalized();
@@ -20,6 +64,18 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
 
     for root in roots {
         let root_path = PathBuf::from(root);
+        // #region agent log
+        agent_debug_log(
+            "H_dedup_root",
+            "indexer/scan.rs:scan_library",
+            "root_input",
+            serde_yaml::Value::Mapping({
+                let mut m = serde_yaml::Mapping::new();
+                m.insert("root".into(), root.to_string().into());
+                m
+            }),
+        );
+        // #endregion agent log
         if !root_path.exists() {
             report.record_issue(IndexIssue {
                 kind: IndexIssueKind::MissingFolder,
@@ -43,6 +99,22 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
         };
 
         let root_key = canonical_dedup_key(&root_canon);
+        // #region agent log
+        agent_debug_log(
+            "H_dedup_root",
+            "indexer/scan.rs:scan_library",
+            "root_canon_and_key",
+            serde_yaml::Value::Mapping({
+                let mut m = serde_yaml::Mapping::new();
+                m.insert(
+                    "root_canon".into(),
+                    root_canon.to_string_lossy().to_string().into(),
+                );
+                m.insert("root_key".into(), root_key.to_string_lossy().to_string().into());
+                m
+            }),
+        );
+        // #endregion agent log
         if let Err(e) = scan_dir_recursive(
             &root_canon,
             &root_canon,
@@ -89,6 +161,22 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
         }
         a.id.cmp(&b.id)
     });
+
+    // #region agent log
+    agent_debug_log(
+        "H_dedup_summary",
+        "indexer/scan.rs:scan_library",
+        "scan_complete",
+        serde_yaml::Value::Mapping({
+            let mut m = serde_yaml::Mapping::new();
+            m.insert("tracks_len".into(), (tracks.len() as i64).into());
+            m.insert("deduped".into(), (report.deduped as i64).into());
+            m.insert("roots_total".into(), (report.roots_total as i64).into());
+            m.insert("roots_ok".into(), (report.roots_ok as i64).into());
+            m
+        }),
+    );
+    // #endregion agent log
 
     report.tracks_total = tracks.len();
     LibraryIndex {
@@ -188,8 +276,7 @@ fn scan_dir_recursive(
             continue;
         }
 
-        let force_canon_fail =
-            std::env::var_os("OST_PLAYER_TEST_FORCE_CANONICALIZE_FAIL").is_some();
+        let force_canon_fail = options.force_canonicalize_fail;
         let (best_path, canon_key) = if force_canon_fail {
             (path.clone(), None)
         } else {
@@ -212,7 +299,59 @@ fn scan_dir_recursive(
         };
 
         if let Some(key) = canon_key {
-            if !seen_paths.insert(key) {
+            // #region agent log
+            let key_hash = {
+                let mut hh = std::collections::hash_map::DefaultHasher::new();
+                os_str_sort_key(key.as_os_str()).hash(&mut hh);
+                hh.finish()
+            };
+            agent_debug_log(
+                "H_dedup_file",
+                "indexer/scan.rs:scan_dir_recursive",
+                "file_canon_key",
+                serde_yaml::Value::Mapping({
+                    let mut m = serde_yaml::Mapping::new();
+                    m.insert("path".into(), path.to_string_lossy().to_string().into());
+                    m.insert(
+                        "best_path".into(),
+                        best_path.to_string_lossy().to_string().into(),
+                    );
+                    m.insert("canon_key".into(), key.to_string_lossy().to_string().into());
+                    m.insert("canon_key_hash".into(), (key_hash as i64).into());
+                    m
+                }),
+            );
+            // #endregion agent log
+            let inserted = seen_paths.insert(key);
+            // #region agent log
+            agent_debug_log(
+                "H_dedup_file",
+                "indexer/scan.rs:scan_dir_recursive",
+                "seen_paths_insert_result",
+                serde_yaml::Value::Mapping({
+                    let mut m = serde_yaml::Mapping::new();
+                    m.insert("inserted".into(), inserted.into());
+                    m.insert("seen_paths_len".into(), (seen_paths.len() as i64).into());
+                    m
+                }),
+            );
+            // #endregion agent log
+            if !inserted {
+                // #region agent log
+                agent_debug_log(
+                    "H_dedup_file",
+                    "indexer/scan.rs:scan_dir_recursive",
+                    "dedup_skip",
+                    serde_yaml::Value::Mapping({
+                        let mut m = serde_yaml::Mapping::new();
+                        m.insert(
+                            "best_path".into(),
+                            best_path.to_string_lossy().to_string().into(),
+                        );
+                        m
+                    }),
+                );
+                // #endregion agent log
                 report.deduped += 1;
                 continue;
             }
@@ -234,6 +373,26 @@ fn scan_dir_recursive(
             rel_path,
             size_bytes: size,
         });
+        // #region agent log
+        agent_debug_log(
+            "H_dedup_file",
+            "indexer/scan.rs:scan_dir_recursive",
+            "track_pushed",
+            serde_yaml::Value::Mapping({
+                let mut m = serde_yaml::Mapping::new();
+                m.insert("out_tracks_len".into(), (out_tracks.len() as i64).into());
+                m.insert(
+                    "pushed_path".into(),
+                    out_tracks
+                        .last()
+                        .map(|t| t.path.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                        .into(),
+                );
+                m
+            }),
+        );
+        // #endregion agent log
     }
 
     Ok(())
@@ -244,7 +403,14 @@ fn canonical_dedup_key(path: &Path) -> OsString {
     #[cfg(windows)]
     {
         if let Some(s) = path.as_os_str().to_str() {
-            return OsString::from(s.to_ascii_lowercase());
+            // Normalize common Windows path variations so dedup is stable:
+            // - strip verbatim prefix (\\?\) that `canonicalize()` may add
+            // - normalize slashes
+            let mut norm = s.replace('/', "\\");
+            if let Some(rest) = norm.strip_prefix(r"\\?\") {
+                norm = rest.to_string();
+            }
+            return OsString::from(norm.to_ascii_lowercase());
         }
         return path.as_os_str().to_os_string();
     }
