@@ -39,7 +39,7 @@ mod windows {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
-    use ::windows::Win32::Foundation::{GetLastError, HWND, LPARAM, WPARAM};
+    use ::windows::Win32::Foundation::{GetLastError, LPARAM, WPARAM};
     use ::windows::Win32::System::Threading::GetCurrentThreadId;
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL,
@@ -168,7 +168,6 @@ mod windows {
         }
         if let Some(bind) = &b.prev {
             out.push(reg_next_prev(next_id, false, bind));
-            next_id += 1;
         }
         Ok(out)
     }
@@ -337,7 +336,7 @@ mod windows {
             }
 
             unsafe {
-                TranslateMessage(&msg);
+                let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }

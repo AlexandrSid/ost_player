@@ -172,6 +172,18 @@ impl PlayerHandle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        cmd_tx: mpsc::Sender<PlayerCommand>,
+        evt_rx: mpsc::Receiver<PlayerEvent>,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            evt_rx,
+            join: None,
+        }
+    }
+
     pub fn send(&self, cmd: PlayerCommand) {
         // Best-effort. If UI is shutting down, ignore send failures.
         let _ = self.cmd_tx.send(cmd);
@@ -193,7 +205,7 @@ impl PlayerHandle {
             .map_err(|_| "player thread panicked".to_string())
     }
 
-    pub fn shutdown_and_join(mut self, timeout: Duration) -> Result<(), String> {
+    pub fn shutdown_and_join(self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
 
         // Ask the playback thread to stop.
@@ -552,7 +564,12 @@ impl Engine {
         }
 
         // Nothing playable found. Stop to avoid being stuck on a broken track.
+        let err_for_last_error = last_err.clone();
         self.stop();
+        // Keep the last decode/play failure visible to the caller even though we stop playback.
+        // Explicit `stop()` should still clear last_error; this path is an internal stop due to
+        // repeated failures.
+        self.last_error = err_for_last_error;
         Err(last_err.unwrap_or_else(|| "all remaining tracks failed to decode".to_string()))
     }
 

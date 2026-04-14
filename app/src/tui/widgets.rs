@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextInputResult {
@@ -206,6 +206,7 @@ impl ConfirmDialog {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+    use unicode_width::UnicodeWidthChar;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())

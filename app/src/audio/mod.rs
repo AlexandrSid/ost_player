@@ -14,9 +14,12 @@ pub fn try_default_output() -> Result<(rodio::OutputStream, rodio::OutputStreamH
         .map_err(|_| "audio output unavailable (no default output device?)".to_string())
 }
 
-type BoxedReadSeek = Box<dyn Read + Seek + Send>;
+pub(crate) trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
 
-pub fn decode_file(path: &Path) -> Result<rodio::Decoder<BufReader<BoxedReadSeek>>, String> {
+type BoxedReadSeek = Box<dyn ReadSeek + Send + Sync>;
+
+pub(crate) fn decode_file(path: &Path) -> Result<rodio::Decoder<BufReader<BoxedReadSeek>>, String> {
     if !is_ogg(path) {
         return decode_file_default(path);
     }
@@ -40,7 +43,7 @@ fn decode_file_via_ffmpeg(path: &Path) -> Result<rodio::Decoder<BufReader<BoxedR
 
     // Convert to WAV on stdout, then let rodio decode WAV.
     // Spool stdout to a temp file so we don't buffer full WAV in memory (rodio needs Read+Seek).
-    let mut tmp = NamedTempFile::new()
+    let tmp = NamedTempFile::new()
         .map_err(|e| format!("failed to create temp file for ffmpeg WAV output: {e}"))?;
     let stdout_file = tmp
         .as_file()

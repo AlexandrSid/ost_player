@@ -37,7 +37,6 @@ fn commands_from_multiple_sources_are_delivered_in_order_and_tagged() {
                 _ => panic!("expected SetStatus action"),
             }
         }
-        _ => panic!("expected Command message"),
     }
 
     match &msgs[1] {
@@ -48,7 +47,6 @@ fn commands_from_multiple_sources_are_delivered_in_order_and_tagged() {
                 _ => panic!("expected SetStatus action"),
             }
         }
-        _ => panic!("expected Command message"),
     }
 
     match &msgs[2] {
@@ -59,7 +57,6 @@ fn commands_from_multiple_sources_are_delivered_in_order_and_tagged() {
                 _ => panic!("expected SetStatus action"),
             }
         }
-        _ => panic!("expected Command message"),
     }
 }
 

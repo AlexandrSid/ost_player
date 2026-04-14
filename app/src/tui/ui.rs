@@ -406,7 +406,7 @@ mod tests {
         let area = buf.area();
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
-                out.push_str(buf.get(x, y).symbol());
+                out.push_str(buf[(x, y)].symbol());
             }
             out.push('\n');
         }

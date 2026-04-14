@@ -1,4 +1,4 @@
-use ost_player::config::{AppConfig, RepeatMode};
+use ost_player::config::{AppConfig, FolderEntry, RepeatMode};
 use ost_player::config::io as config_io;
 use ost_player::error::AppError;
 use ost_player::paths::AppPaths;
@@ -116,7 +116,13 @@ folders:
     assert_eq!(cfg.settings.min_size_bytes, 123);
     assert!(cfg.settings.shuffle);
     assert!(matches!(cfg.settings.repeat, RepeatMode::All));
-    assert_eq!(cfg.folders, vec!["C:\\Music".to_string(), "D:\\Other".to_string()]);
+    assert_eq!(
+        cfg.folders,
+        vec![
+            FolderEntry::new("C:\\Music".to_string()),
+            FolderEntry::new("D:\\Other".to_string())
+        ]
+    );
 }
 
 #[test]

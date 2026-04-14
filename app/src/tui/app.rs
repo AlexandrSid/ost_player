@@ -365,7 +365,7 @@ impl TuiApp {
                     return Ok(());
                 }
                 let id = playlist_id(name);
-                let mut p = Playlist {
+                let p = Playlist {
                     id,
                     name: name.to_string(),
                     folders: self.state.cfg.folders.clone(),
@@ -1598,11 +1598,7 @@ mod tests {
         // Replace the real player handle with a controllable one.
         let (cmd_tx, _cmd_rx) = mpsc::channel::<PlayerCommand>();
         let (evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
-        app.player = Some(PlayerHandle {
-            cmd_tx,
-            evt_rx,
-            join: None,
-        });
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
 
         // First snapshot carries an error.
         evt_tx

@@ -1,5 +1,5 @@
 use ost_player::config::io as config_io;
-use ost_player::config::{AppConfig, RepeatMode};
+use ost_player::config::{AppConfig, FolderEntry, RepeatMode};
 use ost_player::error::AppError;
 use ost_player::paths::AppPaths;
 use ost_player::playlists::io as playlists_io;
@@ -144,7 +144,10 @@ fn config_save_is_atomicish_no_tmp_or_bak_left_and_no_data_loss() {
     fs::create_dir_all(&paths.data_dir).unwrap();
 
     let mut cfg = AppConfig::default();
-    cfg.folders = vec!["C:\\Music".to_string(), "C:\\Music".to_string()];
+    cfg.folders = vec![
+        FolderEntry::new("C:\\Music".to_string()),
+        FolderEntry::new("C:\\Music".to_string()),
+    ];
     cfg.settings.shuffle = true;
     cfg.settings.repeat = RepeatMode::All;
 
@@ -158,7 +161,7 @@ fn config_save_is_atomicish_no_tmp_or_bak_left_and_no_data_loss() {
     let loaded = config_io::load_or_create(&paths).expect("should load saved config");
     assert!(loaded.settings.shuffle);
     assert!(matches!(loaded.settings.repeat, RepeatMode::All));
-    assert_eq!(loaded.folders, vec!["C:\\Music".to_string()]);
+    assert_eq!(loaded.folders, vec![FolderEntry::new("C:\\Music".to_string())]);
 
     // Implementation writes via `{file}.tmp` and uses `{file}.bak` during replacement.
     let tmp = paths
@@ -249,7 +252,7 @@ fn playlists_save_is_atomicish_no_tmp_or_bak_left_and_no_data_loss() {
     pls.playlists.push(ost_player::playlists::Playlist {
         id: "p1".to_string(),
         name: "My".to_string(),
-        folders: vec!["C:\\Music".to_string()],
+        folders: vec![FolderEntry::new("C:\\Music".to_string())],
         extra: Default::default(),
     });
 
