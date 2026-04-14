@@ -138,5 +138,21 @@ settings:
         assert!(cfg.settings.shuffle);
         assert!(cfg.settings.extra.contains_key("future_setting"));
     }
+
+    #[test]
+    fn legacy_folders_vec_string_deserializes_as_root_only_true() {
+        let raw = r#"
+schema_version: 1
+folders: ["C:\\Music", "D:\\More"]
+settings:
+  supported_extensions: [mp3]
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(cfg.folders.len(), 2);
+        assert_eq!(cfg.folders[0].path, "C:\\Music");
+        assert!(cfg.folders[0].root_only);
+        assert_eq!(cfg.folders[1].path, "D:\\More");
+        assert!(cfg.folders[1].root_only);
+    }
 }
 

@@ -23,5 +23,9 @@ impl NowPlayingScreen {
             _ => None,
         })
     }
+
+    pub fn on_paste(&mut self, _state: &AppState, _text: &str) -> AppResult<Option<Action>> {
+        Ok(None)
+    }
 }
 

@@ -19,6 +19,7 @@ pub enum Action {
     // Config mutations
     AddFolder(String),
     RemoveFolderAt(usize),
+    ToggleFolderRootOnlyAt(usize),
     SetMinSizeBytes(u64),
     ToggleShuffle,
     CycleRepeat,

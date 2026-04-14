@@ -66,7 +66,8 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
         items.push(ListItem::new("(no folders yet)"));
     } else {
         for (idx, f) in v.folders.iter().enumerate() {
-            items.push(ListItem::new(format!("{:>2}. {}", idx + 1, f)));
+            let sym = if f.root_only { "↓" } else { "○" };
+            items.push(ListItem::new(format!("{:>2}. {sym} {}", idx + 1, f.path)));
         }
     }
 
@@ -85,6 +86,7 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
         "Main menu:",
         "  1 / a  add folder",
         "  2 / d  remove selected folder",
+        "  t      toggle root_only for selected folder",
         "  3 / Enter / Space  play",
         "  4 / s  settings",
         "  5 / p  playlists",
@@ -305,11 +307,21 @@ fn draw_text_input_modal(frame: &mut Frame, input: &TextInput) {
         Paragraph::new(input.title.as_str()).wrap(Wrap { trim: true }),
         inner[0],
     );
+
+    let input_block = Block::default().borders(Borders::ALL).title("Input");
+    let input_inner = input_block.inner(inner[1]);
+    let (visible, cursor_x) = input.display_for_width(input_inner.width);
     frame.render_widget(
-        Paragraph::new(input.value.as_str())
-            .block(Block::default().borders(Borders::ALL).title("Input")),
+        Paragraph::new(visible).block(input_block),
         inner[1],
     );
+
+    // Ensure the terminal cursor is always visible while the modal is open.
+    // Place it at the visible cursor position, even when buffer is empty.
+    frame.set_cursor_position(Position {
+        x: input_inner.x.saturating_add(cursor_x),
+        y: input_inner.y,
+    });
     frame.render_widget(
         Paragraph::new(input.help.as_str()).wrap(Wrap { trim: true }),
         inner[2],
@@ -360,5 +372,79 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             .as_ref(),
         )
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppConfig, FolderEntry};
+    use crate::paths::AppPaths;
+    use crate::playlists::PlaylistsFile;
+    use crate::tui::app::TuiApp;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::Terminal;
+    use std::path::Path;
+
+    fn paths_for(base_dir: &Path) -> AppPaths {
+        let base_dir = base_dir.to_path_buf();
+        let data_dir = base_dir.join("data");
+        AppPaths {
+            base_dir,
+            data_dir: data_dir.clone(),
+            cache_dir: data_dir.join("cache"),
+            logs_dir: data_dir.join("logs"),
+            playlists_dir: data_dir.join("playlists"),
+            config_path: data_dir.join("config.yaml"),
+            playlists_path: data_dir.join("playlists.yaml"),
+            state_path: data_dir.join("state.yaml"),
+        }
+    }
+
+    fn buffer_as_text(buf: &Buffer) -> String {
+        let mut out = String::new();
+        let area = buf.area();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                out.push_str(buf.get(x, y).symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn main_menu_folder_lines_render_root_only_symbol_before_path() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![
+            FolderEntry {
+                path: "C:\\Music".to_string(),
+                root_only: true,
+            },
+            FolderEntry {
+                path: "C:\\Games".to_string(),
+                root_only: false,
+            },
+        ];
+
+        let mut app = TuiApp::new(paths, cfg, PlaylistsFile::default());
+        app.state.main_selected_folder = 0; // selection adds "▶ " prefix; keep it predictable
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buffer_as_text(terminal.backend().buffer());
+        assert!(
+            text.contains(". ↓ C:\\Music"),
+            "expected root_only=true folder to render with ↓ symbol"
+        );
+        assert!(
+            text.contains(". ○ C:\\Games"),
+            "expected root_only=false folder to render with ○ symbol"
+        );
+    }
 }
 

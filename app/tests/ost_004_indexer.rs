@@ -1,6 +1,6 @@
 use ost_player::indexer::io as index_io;
-use ost_player::indexer::scan::scan_library;
-use ost_player::indexer::{IndexIssueKind, ScanOptions};
+use ost_player::indexer::scan::{scan_library, scan_library_folders};
+use ost_player::indexer::{FolderScanEntry, IndexIssueKind, ScanOptions};
 use ost_player::paths::AppPaths;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,6 +40,60 @@ fn default_scan_options() -> ScanOptions {
         allow_name_size_fallback_dedup: false,
         force_canonicalize_fail: false,
     }
+}
+
+#[test]
+fn scan_root_only_true_indexes_only_root_audio_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("music");
+    fs::create_dir_all(&root).unwrap();
+
+    write_file_of_size(&root.join("root.ogg"), 10);
+    write_file_of_size(&root.join("sub").join("nested.ogg"), 10);
+
+    let options = default_scan_options();
+    let folders = vec![FolderScanEntry {
+        path: root.to_string_lossy().to_string(),
+        root_only: true,
+    }];
+    let idx = scan_library_folders(&folders, &options);
+
+    assert_eq!(idx.report.issues.len(), 0);
+    assert_eq!(idx.tracks.len(), 1, "root_only=true should not recurse");
+    let names = idx
+        .tracks
+        .iter()
+        .map(|t| t.path.file_name().unwrap().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("root.ogg")));
+    assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("nested.ogg")));
+}
+
+#[test]
+fn scan_root_only_false_indexes_root_and_nested_audio_files() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("music");
+    fs::create_dir_all(&root).unwrap();
+
+    write_file_of_size(&root.join("root.ogg"), 10);
+    write_file_of_size(&root.join("sub").join("nested.ogg"), 10);
+
+    let options = default_scan_options();
+    let folders = vec![FolderScanEntry {
+        path: root.to_string_lossy().to_string(),
+        root_only: false,
+    }];
+    let idx = scan_library_folders(&folders, &options);
+
+    assert_eq!(idx.report.issues.len(), 0);
+    assert_eq!(idx.tracks.len(), 2, "root_only=false should recurse");
+    let names = idx
+        .tracks
+        .iter()
+        .map(|t| t.path.file_name().unwrap().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("root.ogg")));
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("nested.ogg")));
 }
 
 #[test]

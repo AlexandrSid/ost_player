@@ -121,5 +121,52 @@ playlists:
         assert!(paths.playlists_path.exists());
         assert!(!tmp.exists());
     }
+
+    #[test]
+    fn legacy_playlists_folders_vec_string_deserializes_as_folder_entries_root_only_true() {
+        let raw = r#"
+schema_version: 1
+active: null
+playlists:
+  - id: p1
+    name: My Playlist
+    folders: ["C:\\Music", "D:\\OST"]
+"#;
+        let pls: PlaylistsFile = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(pls.playlists.len(), 1);
+        assert_eq!(pls.playlists[0].folders.len(), 2);
+        assert_eq!(pls.playlists[0].folders[0].path, "C:\\Music");
+        assert!(pls.playlists[0].folders[0].root_only);
+        assert_eq!(pls.playlists[0].folders[1].path, "D:\\OST");
+        assert!(pls.playlists[0].folders[1].root_only);
+    }
+
+    #[test]
+    fn playlists_serialization_skips_root_only_true_but_keeps_false() {
+        let pls = PlaylistsFile {
+            schema_version: 1,
+            active: None,
+            playlists: vec![super::super::Playlist {
+                id: "p1".to_string(),
+                name: "My Playlist".to_string(),
+                folders: vec![
+                    crate::config::FolderEntry {
+                        path: "C:\\Music".to_string(),
+                        root_only: true,
+                    },
+                    crate::config::FolderEntry {
+                        path: "D:\\OST".to_string(),
+                        root_only: false,
+                    },
+                ],
+                extra: Default::default(),
+            }],
+            extra: Default::default(),
+        };
+
+        let y = serde_yaml::to_string(&pls).unwrap();
+        assert!(!y.contains("root_only: true"));
+        assert!(y.contains("root_only: false"));
+    }
 }
 

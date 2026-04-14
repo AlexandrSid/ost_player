@@ -3,6 +3,7 @@ use queue::PlayerQueue;
 use rodio::Source;
 use std::any::Any;
 use std::path::PathBuf;
+use std::collections::HashSet;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -109,6 +110,7 @@ pub struct PlayerSnapshot {
     pub queue_len: usize,
     pub track_position: Duration,
     pub track_duration: Option<Duration>,
+    pub last_error: Option<String>,
 }
 
 impl Default for PlayerSnapshot {
@@ -122,6 +124,7 @@ impl Default for PlayerSnapshot {
             queue_len: 0,
             track_position: Duration::from_secs(0),
             track_duration: None,
+            last_error: None,
         }
     }
 }
@@ -294,6 +297,7 @@ struct Engine {
     repeat: RepeatMode,
     current_path: Option<PathBuf>,
     current_duration: Option<Duration>,
+    last_error: Option<String>,
 }
 
 impl Engine {
@@ -310,6 +314,7 @@ impl Engine {
             repeat,
             current_path: None,
             current_duration: None,
+            last_error: None,
         }
     }
 
@@ -327,6 +332,7 @@ impl Engine {
             repeat,
             current_path: None,
             current_duration: None,
+            last_error: None,
         }
     }
 
@@ -343,6 +349,7 @@ impl Engine {
             queue_len,
             track_position,
             track_duration: self.current_duration,
+            last_error: self.last_error.clone(),
         }));
     }
 
@@ -369,7 +376,7 @@ impl Engine {
                     return Ok(());
                 }
                 let start_pos = self.queue.pos_in_order().unwrap_or(0);
-                self.play_at_pos(start_pos)
+                self.play_from_pos_with_skip(start_pos, SeekDirection::Forward)
             }
             PlayerCommand::TogglePlayPause => self.toggle_play_pause(),
             PlayerCommand::Stop => {
@@ -428,6 +435,7 @@ impl Engine {
         self.status = PlaybackStatus::Stopped;
         self.current_path = None;
         self.current_duration = None;
+        self.last_error = None;
     }
 
     fn next(&mut self) -> Result<(), String> {
@@ -451,7 +459,7 @@ impl Engine {
                 }
             }
         };
-        self.play_at_pos(next_pos)
+        self.play_from_pos_with_skip(next_pos, SeekDirection::Forward)
     }
 
     fn prev(&mut self) -> Result<(), String> {
@@ -463,14 +471,14 @@ impl Engine {
             Some(0) => 0,
             Some(pos) => pos - 1,
         };
-        self.play_at_pos(prev_pos)
+        self.play_from_pos_with_skip(prev_pos, SeekDirection::Backward)
     }
 
     fn advance_after_end(&mut self) -> bool {
         match self.repeat {
             RepeatMode::One => {
                 if let Some(pos) = self.queue.pos_in_order() {
-                    if self.play_at_pos(pos).is_ok() {
+                    if self.play_from_pos_with_skip(pos, SeekDirection::Forward).is_ok() {
                         return true;
                     }
                 }
@@ -484,6 +492,68 @@ impl Engine {
                 false
             }
         }
+    }
+
+    fn play_from_pos_with_skip(
+        &mut self,
+        start_pos_in_order: usize,
+        direction: SeekDirection,
+    ) -> Result<(), String> {
+        if self.queue.is_empty() {
+            self.stop();
+            return Ok(());
+        }
+
+        let len = self.queue.order_len();
+        if len == 0 {
+            self.stop();
+            return Ok(());
+        }
+
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut attempts: usize = 0;
+        let mut pos = start_pos_in_order.min(len.saturating_sub(1));
+        let mut last_err: Option<String> = None;
+
+        // Try at most `len` distinct positions to avoid infinite loops when all tracks are bad.
+        while attempts < len && visited.insert(pos) {
+            attempts += 1;
+            match self.play_at_pos(pos) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    self.last_error = Some(e.clone());
+                    last_err = Some(e);
+
+                    // Advance to the next candidate in the requested direction.
+                    let next = match direction {
+                        SeekDirection::Forward => {
+                            if pos + 1 < len {
+                                Some(pos + 1)
+                            } else {
+                                match self.repeat {
+                                    RepeatMode::All => Some(0),
+                                    RepeatMode::Off | RepeatMode::One => None,
+                                }
+                            }
+                        }
+                        SeekDirection::Backward => {
+                            if pos > 0 {
+                                Some(pos - 1)
+                            } else {
+                                None
+                            }
+                        }
+                    };
+
+                    let Some(n) = next else { break };
+                    pos = n;
+                }
+            }
+        }
+
+        // Nothing playable found. Stop to avoid being stuck on a broken track.
+        self.stop();
+        Err(last_err.unwrap_or_else(|| "all remaining tracks failed to decode".to_string()))
     }
 
     fn play_at_pos(&mut self, pos_in_order: usize) -> Result<(), String> {
@@ -509,6 +579,7 @@ impl Engine {
         self.status = PlaybackStatus::Playing;
         self.current_path = Some(path);
         self.current_duration = duration;
+        self.last_error = None;
         Ok(())
     }
 
@@ -553,6 +624,12 @@ impl Engine {
         let rodio_sink = sink.as_ref().as_any().downcast_ref::<RodioSink>()?;
         Some(rodio_sink.0.get_pos())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeekDirection {
+    Forward,
+    Backward,
 }
 
 #[cfg(test)]
@@ -626,6 +703,56 @@ mod tests {
             append_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             default_output_ok: true,
             fail_append: false,
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailFirstAppendBackend {
+        sink_empty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        default_output_ok: bool,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail_message: String,
+    }
+
+    impl FailFirstAppendBackend {
+        fn new(fail_message: &str) -> Self {
+            Self {
+                sink_empty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                default_output_ok: true,
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                fail_message: fail_message.to_string(),
+            }
+        }
+    }
+
+    impl AudioBackend for FailFirstAppendBackend {
+        fn try_init(&mut self) -> Result<(), String> {
+            if self.default_output_ok {
+                Ok(())
+            } else {
+                Err("no output".to_string())
+            }
+        }
+
+        fn create_sink(&self) -> Result<Box<dyn AudioSinkLike>, String> {
+            Ok(Box::new(MockSink {
+                empty: self.sink_empty.clone(),
+            }))
+        }
+
+        fn append_file(
+            &self,
+            _sink: &mut dyn AudioSinkLike,
+            _path: &std::path::Path,
+        ) -> Result<Option<Duration>, String> {
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n == 0 {
+                Err(self.fail_message.clone())
+            } else {
+                Ok(None)
+            }
         }
     }
 
@@ -808,5 +935,74 @@ mod tests {
         assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
         assert_eq!(e.queue.pos_in_order(), Some(0));
         assert_eq!(e.status, PlaybackStatus::Playing);
+    }
+
+    #[test]
+    fn fix_006_decode_failure_on_first_track_skips_to_next_and_sets_last_error() {
+        let backend = FailFirstAppendBackend::new("decode failed: bad file");
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend));
+
+        e.on_command(PlayerCommand::LoadQueue {
+            tracks: vec![p("a.ogg"), p("b.ogg")],
+            start_index: 0,
+        })
+        .unwrap();
+
+        // First track fails to decode -> should skip to next playable track.
+        assert_eq!(e.status, PlaybackStatus::Playing);
+        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("b.ogg")));
+        assert_eq!(e.queue.pos_in_order(), Some(1));
+        // Option A (FIX-006 semantics): last_error is set on failure, but clears on the next
+        // successful track start (so after skipping to b.ogg it should be None).
+        assert_eq!(e.last_error, None);
+
+        // Snapshot should reflect the current state (FIX-006): after a successful skip,
+        // last_error is cleared and current_path points to the playable track.
+        let (tx, rx) = mpsc::channel::<PlayerEvent>();
+        e.emit_snapshot(&tx);
+        let snap = match rx.try_recv().unwrap() {
+            PlayerEvent::Snapshot(s) => s,
+            other => panic!("expected snapshot event, got: {other:?}"),
+        };
+        assert_eq!(snap.last_error, None);
+        assert_eq!(
+            snap.current_path.as_deref(),
+            Some(std::path::Path::new("b.ogg"))
+        );
+    }
+
+    #[test]
+    fn fix_006_last_error_clears_after_later_successful_play_and_on_stop() {
+        // Establish last_error after playback failures.
+        let mut bad = backend_ok();
+        bad.fail_append = true;
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(bad));
+        e.queue
+            .load(vec![p("a.ogg"), p("b.ogg")], 0, /*shuffle*/ false)
+            .unwrap();
+
+        let err = e
+            .play_from_pos_with_skip(0, SeekDirection::Forward)
+            .unwrap_err();
+        assert!(
+            err.contains("decode failed"),
+            "expected decode failure, got: {err:?}"
+        );
+        assert!(
+            e.last_error.as_deref().unwrap_or_default().contains("decode failed"),
+            "expected last_error to be set after failures, got: {:?}",
+            e.last_error
+        );
+
+        // A later successful start clears last_error.
+        e.backend = Box::new(backend_ok());
+        e.backend_available = true;
+        e.play_at_pos(0).unwrap();
+        assert_eq!(e.last_error, None);
+
+        // And stop() clears last_error as well.
+        e.last_error = Some("some error".to_string());
+        e.stop();
+        assert_eq!(e.last_error, None);
     }
 }

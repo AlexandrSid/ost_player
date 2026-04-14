@@ -41,6 +41,14 @@ impl SettingsScreen {
         Ok(self.handle_normal_key(state, key))
     }
 
+    pub fn on_paste(&mut self, _state: &AppState, text: &str) -> AppResult<Option<Action>> {
+        if let Some(input) = &mut self.min_size_input {
+            input.on_paste(text);
+            return Ok(None);
+        }
+        Ok(None)
+    }
+
     fn handle_normal_key(&mut self, state: &AppState, key: KeyEvent) -> Option<Action> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(Action::Navigate(Screen::MainMenu)),

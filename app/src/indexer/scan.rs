@@ -1,59 +1,27 @@
 use crate::indexer::model::{
-    IndexIssue, IndexIssueKind, IndexReport, LibraryIndex, ScanOptions, TrackEntry, TrackId,
+    FolderScanEntry, IndexIssue, IndexIssueKind, IndexReport, LibraryIndex, ScanOptions, TrackEntry,
+    TrackId,
 };
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use serde_json;
-
-// #region agent log
-#[allow(dead_code)]
-fn agent_debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_yaml::Value) {
-    // Enable only when explicitly requested to keep normal runs clean.
-    if std::env::var_os("OST_PLAYER_DEBUG_DEDUP").is_none() {
-        return;
-    }
-
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let payload = serde_yaml::Value::Mapping({
-        let mut m = serde_yaml::Mapping::new();
-        m.insert("sessionId".into(), "9686b3".into());
-        m.insert("runId".into(), "dedup-test".into());
-        m.insert("hypothesisId".into(), hypothesis_id.into());
-        m.insert("location".into(), location.into());
-        m.insert("message".into(), message.into());
-        m.insert("timestamp".into(), ts.into());
-        m.insert("data".into(), data);
-        m
-    });
-
-    // Write to workspace root debug log (one level above app/).
-    let log_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("debug-9686b3.log");
-
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        if let Ok(line) = serde_json::to_string(&payload) {
-            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-            let _ = std::io::Write::write_all(&mut f, b"\n");
-        }
-    }
-}
-// #endregion agent log
 
 pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
+    let folders = roots
+        .iter()
+        .map(|p| FolderScanEntry {
+            path: p.clone(),
+            root_only: false,
+        })
+        .collect::<Vec<_>>();
+    scan_library_folders(&folders, options)
+}
+
+pub fn scan_library_folders(folders: &[FolderScanEntry], options: &ScanOptions) -> LibraryIndex {
     let options = options.normalized();
     let mut report = IndexReport::default();
-    report.roots_total = roots.len();
+    report.roots_total = folders.len();
 
     let mut tracks: Vec<TrackEntry> = Vec::new();
 
@@ -62,20 +30,8 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
     // Optional fallback: (root identity, relative path within root (case-normalized on Windows), size).
     let mut seen_rel_size: HashSet<(OsString, OsString, u64)> = HashSet::new();
 
-    for root in roots {
-        let root_path = PathBuf::from(root);
-        // #region agent log
-        agent_debug_log(
-            "H_dedup_root",
-            "indexer/scan.rs:scan_library",
-            "root_input",
-            serde_yaml::Value::Mapping({
-                let mut m = serde_yaml::Mapping::new();
-                m.insert("root".into(), root.to_string().into());
-                m
-            }),
-        );
-        // #endregion agent log
+    for folder in folders {
+        let root_path = PathBuf::from(&folder.path);
         if !root_path.exists() {
             report.record_issue(IndexIssue {
                 kind: IndexIssueKind::MissingFolder,
@@ -99,27 +55,12 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
         };
 
         let root_key = canonical_dedup_key(&root_canon);
-        // #region agent log
-        agent_debug_log(
-            "H_dedup_root",
-            "indexer/scan.rs:scan_library",
-            "root_canon_and_key",
-            serde_yaml::Value::Mapping({
-                let mut m = serde_yaml::Mapping::new();
-                m.insert(
-                    "root_canon".into(),
-                    root_canon.to_string_lossy().to_string().into(),
-                );
-                m.insert("root_key".into(), root_key.to_string_lossy().to_string().into());
-                m
-            }),
-        );
-        // #endregion agent log
-        if let Err(e) = scan_dir_recursive(
+        if let Err(e) = scan_dir(
             &root_canon,
             &root_canon,
             root_key.as_os_str(),
             &options,
+            !folder.root_only,
             &mut tracks,
             &mut seen_paths,
             &mut seen_rel_size,
@@ -162,22 +103,6 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
         a.id.cmp(&b.id)
     });
 
-    // #region agent log
-    agent_debug_log(
-        "H_dedup_summary",
-        "indexer/scan.rs:scan_library",
-        "scan_complete",
-        serde_yaml::Value::Mapping({
-            let mut m = serde_yaml::Mapping::new();
-            m.insert("tracks_len".into(), (tracks.len() as i64).into());
-            m.insert("deduped".into(), (report.deduped as i64).into());
-            m.insert("roots_total".into(), (report.roots_total as i64).into());
-            m.insert("roots_ok".into(), (report.roots_ok as i64).into());
-            m
-        }),
-    );
-    // #endregion agent log
-
     report.tracks_total = tracks.len();
     LibraryIndex {
         schema_version: 1,
@@ -186,11 +111,12 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
     }
 }
 
-fn scan_dir_recursive(
+fn scan_dir(
     root: &Path,
     dir: &Path,
     root_key: &OsStr,
     options: &ScanOptions,
+    recurse: bool,
     out_tracks: &mut Vec<TrackEntry>,
     seen_paths: &mut BTreeSet<OsString>,
     seen_rel_size: &mut HashSet<(OsString, OsString, u64)>,
@@ -228,21 +154,24 @@ fn scan_dir_recursive(
         };
 
         if ft.is_dir() {
-            if let Err(e) = scan_dir_recursive(
-                root,
-                &path,
-                root_key,
-                options,
-                out_tracks,
-                seen_paths,
-                seen_rel_size,
-                report,
-            ) {
-                report.record_issue(IndexIssue {
-                    kind: classify_io_issue(&e, IndexIssueKind::ReadDirFailed),
-                    path: path.clone(),
-                    message: format!("failed to scan directory: {e}"),
-                });
+            if recurse {
+                if let Err(e) = scan_dir(
+                    root,
+                    &path,
+                    root_key,
+                    options,
+                    recurse,
+                    out_tracks,
+                    seen_paths,
+                    seen_rel_size,
+                    report,
+                ) {
+                    report.record_issue(IndexIssue {
+                        kind: classify_io_issue(&e, IndexIssueKind::ReadDirFailed),
+                        path: path.clone(),
+                        message: format!("failed to scan directory: {e}"),
+                    });
+                }
             }
             continue;
         }
@@ -299,59 +228,8 @@ fn scan_dir_recursive(
         };
 
         if let Some(key) = canon_key {
-            // #region agent log
-            let key_hash = {
-                let mut hh = std::collections::hash_map::DefaultHasher::new();
-                os_str_sort_key(key.as_os_str()).hash(&mut hh);
-                hh.finish()
-            };
-            agent_debug_log(
-                "H_dedup_file",
-                "indexer/scan.rs:scan_dir_recursive",
-                "file_canon_key",
-                serde_yaml::Value::Mapping({
-                    let mut m = serde_yaml::Mapping::new();
-                    m.insert("path".into(), path.to_string_lossy().to_string().into());
-                    m.insert(
-                        "best_path".into(),
-                        best_path.to_string_lossy().to_string().into(),
-                    );
-                    m.insert("canon_key".into(), key.to_string_lossy().to_string().into());
-                    m.insert("canon_key_hash".into(), (key_hash as i64).into());
-                    m
-                }),
-            );
-            // #endregion agent log
             let inserted = seen_paths.insert(key);
-            // #region agent log
-            agent_debug_log(
-                "H_dedup_file",
-                "indexer/scan.rs:scan_dir_recursive",
-                "seen_paths_insert_result",
-                serde_yaml::Value::Mapping({
-                    let mut m = serde_yaml::Mapping::new();
-                    m.insert("inserted".into(), inserted.into());
-                    m.insert("seen_paths_len".into(), (seen_paths.len() as i64).into());
-                    m
-                }),
-            );
-            // #endregion agent log
             if !inserted {
-                // #region agent log
-                agent_debug_log(
-                    "H_dedup_file",
-                    "indexer/scan.rs:scan_dir_recursive",
-                    "dedup_skip",
-                    serde_yaml::Value::Mapping({
-                        let mut m = serde_yaml::Mapping::new();
-                        m.insert(
-                            "best_path".into(),
-                            best_path.to_string_lossy().to_string().into(),
-                        );
-                        m
-                    }),
-                );
-                // #endregion agent log
                 report.deduped += 1;
                 continue;
             }
@@ -373,26 +251,6 @@ fn scan_dir_recursive(
             rel_path,
             size_bytes: size,
         });
-        // #region agent log
-        agent_debug_log(
-            "H_dedup_file",
-            "indexer/scan.rs:scan_dir_recursive",
-            "track_pushed",
-            serde_yaml::Value::Mapping({
-                let mut m = serde_yaml::Mapping::new();
-                m.insert("out_tracks_len".into(), (out_tracks.len() as i64).into());
-                m.insert(
-                    "pushed_path".into(),
-                    out_tracks
-                        .last()
-                        .map(|t| t.path.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                        .into(),
-                );
-                m
-            }),
-        );
-        // #endregion agent log
     }
 
     Ok(())
@@ -403,12 +261,30 @@ fn canonical_dedup_key(path: &Path) -> OsString {
     #[cfg(windows)]
     {
         if let Some(s) = path.as_os_str().to_str() {
+            fn is_drive_letter_path(s: &str) -> bool {
+                let b = s.as_bytes();
+                if b.len() < 3 {
+                    return false;
+                }
+                let is_alpha = (b[0] >= b'A' && b[0] <= b'Z') || (b[0] >= b'a' && b[0] <= b'z');
+                is_alpha && b[1] == b':' && b[2] == b'\\'
+            }
+
             // Normalize common Windows path variations so dedup is stable:
             // - strip verbatim prefix (\\?\) that `canonicalize()` may add
+            // - convert verbatim UNC prefix (\\?\UNC\) back to normal UNC (\\)
             // - normalize slashes
             let mut norm = s.replace('/', "\\");
-            if let Some(rest) = norm.strip_prefix(r"\\?\") {
-                norm = rest.to_string();
+            if let Some(rest) = norm.strip_prefix(r"\\?\UNC\") {
+                // `\\?\UNC\server\share\path` => `\\server\share\path`
+                norm = format!("\\\\{rest}");
+            } else if let Some(rest) = norm.strip_prefix(r"\\?\") {
+                // Only strip `\\?\` for drive-letter paths; keep it for device paths
+                // like `\\?\GLOBALROOT\...` or `\\?\Volume{GUID}\...`.
+                if is_drive_letter_path(rest) {
+                    // `\\?\C:\path` => `C:\path`
+                    norm = rest.to_string();
+                }
             }
             return OsString::from(norm.to_ascii_lowercase());
         }
@@ -499,6 +375,103 @@ fn classify_io_issue(err: &std::io::Error, default: IndexIssueKind) -> IndexIssu
         ErrorKind::NotFound => IndexIssueKind::MissingFolder,
         ErrorKind::PermissionDenied => IndexIssueKind::PermissionDenied,
         _ => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_dummy_file(path: &std::path::Path, size_bytes: usize) {
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let data = vec![0u8; size_bytes.max(1)];
+        std::fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn canonical_dedup_key_normalizes_verbatim_unc_prefix() {
+        let p = std::path::PathBuf::from(r"\\?\UNC\Server\Share\Music\Track.ogg");
+        let key = canonical_dedup_key(&p);
+        assert_eq!(
+            key.to_str().unwrap(),
+            r"\\server\share\music\track.ogg"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn canonical_dedup_key_strips_verbatim_prefix_for_local_paths() {
+        let p = std::path::PathBuf::from(r"\\?\C:\Music\Track.ogg");
+        let key = canonical_dedup_key(&p);
+        assert_eq!(key.to_str().unwrap(), r"c:\music\track.ogg");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn canonical_dedup_key_preserves_verbatim_prefix_for_device_paths() {
+        let p = std::path::PathBuf::from(
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Windows\System32",
+        );
+        let key = canonical_dedup_key(&p);
+        assert_eq!(
+            key.to_str().unwrap(),
+            r"\\?\globalroot\device\harddiskvolumeshadowcopy1\windows\system32"
+        );
+    }
+
+    #[test]
+    fn root_only_true_scans_only_top_level_files() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().join("music");
+        let root_track = root.join("a.ogg");
+        let sub_track = root.join("sub").join("b.ogg");
+        write_dummy_file(&root_track, 16);
+        write_dummy_file(&sub_track, 16);
+
+        let opts = ScanOptions {
+            supported_extensions: vec!["ogg".to_string()],
+            min_size_bytes: 1,
+            allow_name_size_fallback_dedup: true,
+            force_canonicalize_fail: false,
+        };
+
+        let folders = vec![FolderScanEntry {
+            path: root.to_string_lossy().to_string(),
+            root_only: true,
+        }];
+
+        let index = scan_library_folders(&folders, &opts);
+        assert_eq!(index.report.issues.len(), 0);
+        assert_eq!(index.tracks.len(), 1);
+        assert!(index.tracks[0].path.ends_with("a.ogg"));
+    }
+
+    #[test]
+    fn root_only_false_scans_recursively() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().join("music");
+        let root_track = root.join("a.ogg");
+        let sub_track = root.join("sub").join("b.ogg");
+        write_dummy_file(&root_track, 16);
+        write_dummy_file(&sub_track, 16);
+
+        let opts = ScanOptions {
+            supported_extensions: vec!["ogg".to_string()],
+            min_size_bytes: 1,
+            allow_name_size_fallback_dedup: true,
+            force_canonicalize_fail: false,
+        };
+
+        let folders = vec![FolderScanEntry {
+            path: root.to_string_lossy().to_string(),
+            root_only: false,
+        }];
+
+        let index = scan_library_folders(&folders, &opts);
+        assert_eq!(index.report.issues.len(), 0);
+        assert_eq!(index.tracks.len(), 2);
     }
 }
 

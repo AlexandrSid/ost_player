@@ -2,6 +2,7 @@ mod defaults;
 pub mod io;
 
 use serde::{Deserialize, Serialize};
+use serde::de;
 use serde_yaml::Value;
 use std::collections::BTreeMap;
 
@@ -177,8 +178,8 @@ pub struct AppConfig {
     pub settings: SettingsConfig,
 
     /// Active folders used for indexing/playback (portable: absolute paths are expected).
-    #[serde(default)]
-    pub folders: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_folders_compat")]
+    pub folders: Vec<FolderEntry>,
 
     #[serde(default)]
     pub hotkeys: HotkeysConfig,
@@ -225,10 +226,14 @@ impl AppConfig {
     }
 
     pub fn normalized(mut self) -> Self {
-        self.folders = dedup_keep_order(self.folders);
+        self.folders = dedup_keep_order_folders(self.folders);
         self.settings.supported_extensions =
             dedup_keep_order(self.settings.supported_extensions.clone());
         self
+    }
+
+    pub fn folder_paths(&self) -> Vec<String> {
+        self.folders.iter().map(|f| f.path.clone()).collect()
     }
 }
 
@@ -244,9 +249,164 @@ impl Default for AppConfig {
     }
 }
 
+fn default_root_only() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FolderEntry {
+    pub path: String,
+
+    #[serde(default = "default_root_only", skip_serializing_if = "is_true")]
+    pub root_only: bool,
+}
+
+impl FolderEntry {
+    pub fn new(path: String) -> Self {
+        Self {
+            path,
+            root_only: default_root_only(),
+        }
+    }
+}
+
 fn dedup_keep_order(mut items: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     items.retain(|v| seen.insert(v.clone()));
     items
 }
 
+fn dedup_keep_order_folders(mut items: Vec<FolderEntry>) -> Vec<FolderEntry> {
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    items.retain(|v| seen.insert(v.path.clone()));
+    items
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum FoldersCompat {
+    Old(Vec<String>),
+    New(Vec<FolderEntry>),
+}
+
+fn deserialize_folders_compat<'de, D>(deserializer: D) -> Result<Vec<FolderEntry>, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    let v = Option::<FoldersCompat>::deserialize(deserializer)?;
+    Ok(match v {
+        None => Vec::new(),
+        Some(FoldersCompat::Old(paths)) => paths.into_iter().map(FolderEntry::new).collect(),
+        Some(FoldersCompat::New(entries)) => entries,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_yaml_folders_vec_string_deserializes_into_folder_entries_root_only_true() {
+        let raw = r#"
+schema_version: 1
+folders: ["C:\\Music", "D:\\OST"]
+settings:
+  supported_extensions: [mp3]
+"#;
+
+        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(
+            cfg.folders,
+            vec![
+                FolderEntry {
+                    path: "C:\\Music".to_string(),
+                    root_only: true,
+                },
+                FolderEntry {
+                    path: "D:\\OST".to_string(),
+                    root_only: true,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn new_yaml_folders_object_form_deserializes_and_root_only_defaults_true_when_omitted() {
+        let raw = r#"
+schema_version: 1
+folders:
+  - path: "C:\\Music"
+    root_only: false
+  - path: "D:\\OST"
+settings:
+  supported_extensions: [mp3]
+"#;
+
+        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(
+            cfg.folders,
+            vec![
+                FolderEntry {
+                    path: "C:\\Music".to_string(),
+                    root_only: false,
+                },
+                FolderEntry {
+                    path: "D:\\OST".to_string(),
+                    root_only: true,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_dedup_keeps_first_occurrence_and_order_stable_for_folders() {
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![
+            FolderEntry {
+                path: "C:\\Music".to_string(),
+                root_only: false,
+            },
+            FolderEntry {
+                path: "C:\\Music".to_string(),
+                root_only: true,
+            },
+            FolderEntry {
+                path: "D:\\OST".to_string(),
+                root_only: true,
+            },
+            FolderEntry {
+                path: "C:\\Music".to_string(),
+                root_only: false,
+            },
+        ];
+
+        let normalized = cfg.normalized();
+        assert_eq!(
+            normalized.folders,
+            vec![
+                FolderEntry {
+                    path: "C:\\Music".to_string(),
+                    root_only: false,
+                },
+                FolderEntry {
+                    path: "D:\\OST".to_string(),
+                    root_only: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn folder_entry_serialization_skips_root_only_true() {
+        let entry = FolderEntry {
+            path: "C:\\Music".to_string(),
+            root_only: true,
+        };
+        let y = serde_yaml::to_string(&entry).unwrap();
+        assert!(!y.contains("root_only: true"));
+    }
+}

@@ -34,6 +34,8 @@ impl TerminalRestoreGuard {
                 source: e,
             });
         }
+        // Keep cursor visible: some terminals hide it on alt-screen entry.
+        let _ = execute!(stdout, cursor::Show);
 
         Ok(Self {
             raw_mode_enabled: true,
@@ -109,6 +111,11 @@ pub fn run(app: &mut TuiApp) -> AppResult<()> {
                             continue;
                         }
                         if let Some(action) = app.on_key(key)? {
+                            bus.emit_action(CommandSource::Tui, action);
+                        }
+                    }
+                    Event::Paste(text) => {
+                        if let Some(action) = app.on_paste(&text)? {
                             bus.emit_action(CommandSource::Tui, action);
                         }
                     }
