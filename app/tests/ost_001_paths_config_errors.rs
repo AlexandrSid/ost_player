@@ -1,5 +1,5 @@
-use ost_player::config::{AppConfig, FolderEntry, RepeatMode};
 use ost_player::config::io as config_io;
+use ost_player::config::{AppConfig, FolderEntry, RepeatMode};
 use ost_player::error::AppError;
 use ost_player::paths::AppPaths;
 use std::fs;
@@ -43,12 +43,18 @@ fn paths_resolve_uses_current_exe_parent() {
         paths.playlists_dir,
         expected_base.join("data").join("playlists")
     );
-    assert_eq!(paths.config_path, expected_base.join("data").join("config.yaml"));
+    assert_eq!(
+        paths.config_path,
+        expected_base.join("data").join("config.yaml")
+    );
     assert_eq!(
         paths.playlists_path,
         expected_base.join("data").join("playlists.yaml")
     );
-    assert_eq!(paths.state_path, expected_base.join("data").join("state.yaml"));
+    assert_eq!(
+        paths.state_path,
+        expected_base.join("data").join("state.yaml")
+    );
 }
 
 #[test]
@@ -135,7 +141,10 @@ fn load_or_create_returns_config_error_on_invalid_yaml() {
     let err = config_io::load_or_create(&paths).unwrap_err();
     match err {
         AppError::Config { message } => {
-            assert!(message.contains("failed to parse"), "message was: {message}");
+            assert!(
+                message.contains("failed to parse"),
+                "message was: {message}"
+            );
             assert!(
                 message.contains("config.yaml"),
                 "message should mention file name; message was: {message}"
@@ -175,7 +184,7 @@ settings:
 fn app_error_display_includes_path_for_io_errors() {
     let err = AppError::Io {
         path: PathBuf::from("X:\\some\\path"),
-        source: std::io::Error::new(std::io::ErrorKind::Other, "boom"),
+        source: std::io::Error::other("boom"),
     };
     let msg = err.to_string();
     assert!(msg.contains("I/O error at"), "msg was: {msg}");
@@ -191,4 +200,3 @@ fn app_config_default_is_stable() {
     assert!(matches!(cfg.settings.repeat, RepeatMode::Off));
     assert!(cfg.folders.is_empty());
 }
-

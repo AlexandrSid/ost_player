@@ -25,7 +25,7 @@ fn fixed_width_indicator(sym: &str) -> String {
         let pad = INDICATOR_TARGET_WIDTH - w;
         let mut out = String::with_capacity(sym.len() + pad);
         out.push_str(sym);
-        out.extend(std::iter::repeat(' ').take(pad));
+        out.extend(std::iter::repeat_n(' ', pad));
         out
     }
 }

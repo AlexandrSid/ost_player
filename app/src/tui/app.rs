@@ -13,6 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+#[cfg(test)]
 use std::time::Instant;
 
 pub trait Persistence {
@@ -82,6 +83,7 @@ struct ScanRequest {
 #[derive(Debug)]
 struct ScanJobState {
     origin: ScanOrigin,
+    #[cfg(test)]
     started_at: Instant,
     rx: mpsc::Receiver<crate::indexer::LibraryIndex>,
     handle: Option<JoinHandle<()>>,
@@ -98,6 +100,7 @@ impl ScanSpawner for ThreadedScanSpawner {
     fn spawn_scan(&self, folders: Vec<FolderScanEntry>, opts: ScanOptions) -> ScanJobState {
         let (tx, rx) = mpsc::channel::<crate::indexer::LibraryIndex>();
         let origin_placeholder = ScanOrigin::RescanLibrary; // overwritten by caller
+        #[cfg(test)]
         let started_at = Instant::now();
         let handle = std::thread::spawn(move || {
             let index = indexer::scan::scan_library_folders(&folders, &opts);
@@ -105,6 +108,7 @@ impl ScanSpawner for ThreadedScanSpawner {
         });
         ScanJobState {
             origin: origin_placeholder,
+            #[cfg(test)]
             started_at,
             rx,
             handle: Some(handle),
@@ -113,13 +117,17 @@ impl ScanSpawner for ThreadedScanSpawner {
 }
 
 impl TuiApp {
-    pub fn new(paths: crate::paths::AppPaths, cfg: crate::config::AppConfig, pls: crate::playlists::PlaylistsFile) -> Self {
+    pub fn new(
+        paths: crate::paths::AppPaths,
+        cfg: crate::config::AppConfig,
+        pls: crate::playlists::PlaylistsFile,
+    ) -> Self {
         Self::new_with_deps(
             paths,
             cfg,
             pls,
-            Box::new(RealPersistence::default()),
-            Box::new(ThreadedScanSpawner::default()),
+            Box::new(RealPersistence),
+            Box::new(ThreadedScanSpawner),
         )
     }
 
@@ -140,7 +148,7 @@ impl TuiApp {
             main_menu: MainMenuScreen::default(),
             settings: SettingsScreen::default(),
             playlists: PlaylistsScreen::default(),
-            now_playing: NowPlayingScreen::default(),
+            now_playing: NowPlayingScreen,
             persistence,
             player: Some(player),
             scan_spawner,
@@ -255,7 +263,8 @@ impl TuiApp {
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
                 if self.state.main_selected_folder >= self.state.cfg.folders.len() {
-                    self.state.main_selected_folder = self.state.cfg.folders.len().saturating_sub(1);
+                    self.state.main_selected_folder =
+                        self.state.cfg.folders.len().saturating_sub(1);
                 }
                 self.state.status = Some("folder removed and saved".to_string());
             }
@@ -316,7 +325,8 @@ impl TuiApp {
                     return Ok(());
                 }
 
-                let req = self.active_folders_scan_request(ScanOrigin::PlayFromLibrary { start_index });
+                let req =
+                    self.active_folders_scan_request(ScanOrigin::PlayFromLibrary { start_index });
                 self.request_scan(req);
                 // If the scan spawner completes synchronously (tests), apply immediately.
                 self.poll_scan_job_completion();
@@ -371,7 +381,8 @@ impl TuiApp {
                     folders: self.state.cfg.folders.clone(),
                     extra: Default::default(),
                 };
-                p.validate().map_err(|msg| AppError::Config { message: msg })?;
+                p.validate()
+                    .map_err(|msg| AppError::Config { message: msg })?;
                 self.state.playlists.playlists.push(p);
                 self.persistence
                     .save_playlists(&self.state.paths, &self.state.playlists)?;
@@ -385,7 +396,8 @@ impl TuiApp {
                 }
                 if let Some(p) = self.state.playlists.playlists.get_mut(idx) {
                     p.name = name.to_string();
-                    p.validate().map_err(|msg| AppError::Config { message: msg })?;
+                    p.validate()
+                        .map_err(|msg| AppError::Config { message: msg })?;
                     self.persistence
                         .save_playlists(&self.state.paths, &self.state.playlists)?;
                     self.state.status = Some("playlist renamed and saved".to_string());
@@ -404,7 +416,8 @@ impl TuiApp {
                     .save_playlists(&self.state.paths, &self.state.playlists)?;
                 self.state.status = Some("playlist deleted and saved".to_string());
                 if self.state.playlists_selected >= self.state.playlists.playlists.len() {
-                    self.state.playlists_selected = self.state.playlists.playlists.len().saturating_sub(1);
+                    self.state.playlists_selected =
+                        self.state.playlists.playlists.len().saturating_sub(1);
                 }
             }
             Action::OverwritePlaylistWithCurrent { idx } => {
@@ -437,7 +450,8 @@ impl TuiApp {
                         .save_playlists(&self.state.paths, &self.state.playlists)?;
 
                     // Proactively rescan so the library/queue view matches the newly active playlist.
-                    let req = self.active_folders_scan_request(ScanOrigin::LoadPlaylist { stopped_playback });
+                    let req = self
+                        .active_folders_scan_request(ScanOrigin::LoadPlaylist { stopped_playback });
                     self.request_scan(req);
                     // If the scan spawner completes synchronously (tests), apply immediately.
                     self.poll_scan_job_completion();
@@ -497,15 +511,14 @@ impl TuiApp {
             self.pending_scan = Some(req);
             // Avoid overwriting higher-priority "play pending" status.
             if self.pending_play_from_library.is_none() {
-                self.state.status = Some("scan already running; queued another scan...".to_string());
+                self.state.status =
+                    Some("scan already running; queued another scan...".to_string());
             }
             return;
         }
 
         self.state.status = Some("Scanning...".to_string());
-        let mut job = self
-            .scan_spawner
-            .spawn_scan(req.folders, req.opts);
+        let mut job = self.scan_spawner.spawn_scan(req.folders, req.opts);
         job.origin = req.origin;
         self.scan_job = Some(job);
     }
@@ -700,6 +713,8 @@ fn playlist_id(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
     use crate::config::{AppConfig, RepeatMode};
     use crate::indexer::{LibraryIndex, TrackEntry, TrackId};
@@ -787,7 +802,7 @@ mod tests {
             cfg,
             playlists,
             Box::new(RcPersistence(mock.clone())),
-            Box::new(InlineScanSpawner::default()),
+            Box::new(InlineScanSpawner),
         );
         (app, mock)
     }
@@ -895,7 +910,10 @@ mod tests {
 
         app.apply(Action::RemoveFolderAt(99)).unwrap();
 
-        assert_eq!(app.state.cfg.folders, vec![FolderEntry::new("A".to_string())]);
+        assert_eq!(
+            app.state.cfg.folders,
+            vec![FolderEntry::new("A".to_string())]
+        );
         assert_eq!(mock.config_writes(), 0);
     }
 
@@ -914,10 +932,16 @@ mod tests {
 
         app.apply(Action::RemoveFolderAt(1)).unwrap();
 
-        assert_eq!(app.state.cfg.folders, vec![FolderEntry::new("A".to_string())]);
+        assert_eq!(
+            app.state.cfg.folders,
+            vec![FolderEntry::new("A".to_string())]
+        );
         assert_eq!(app.state.main_selected_folder, 0);
         assert_eq!(mock.config_writes(), 1);
-        assert_eq!(app.state.status.as_deref(), Some("folder removed and saved"));
+        assert_eq!(
+            app.state.status.as_deref(),
+            Some("folder removed and saved")
+        );
     }
 
     #[test]
@@ -1233,7 +1257,13 @@ mod tests {
         ];
 
         let paths = library_tracks_to_paths(&lib);
-        assert_eq!(paths, vec![std::path::PathBuf::from("A.ogg"), std::path::PathBuf::from("B.ogg")]);
+        assert_eq!(
+            paths,
+            vec![
+                std::path::PathBuf::from("A.ogg"),
+                std::path::PathBuf::from("B.ogg")
+            ]
+        );
     }
 
     #[test]
@@ -1408,12 +1438,8 @@ mod tests {
 
         let manual = ManualScanSpawner::default();
         let sender = manual.clone();
-        let (mut app, _mock) = app_with_mock_and_scan_spawner(
-            paths,
-            cfg,
-            PlaylistsFile::default(),
-            Box::new(manual),
-        );
+        let (mut app, _mock) =
+            app_with_mock_and_scan_spawner(paths, cfg, PlaylistsFile::default(), Box::new(manual));
 
         // Trigger Play while no scan is running: should start a scan and NOT load immediately.
         app.apply(Action::PlayerLoadFromLibrary { start_index: 0 })
@@ -1462,12 +1488,8 @@ mod tests {
 
         let manual = ManualScanSpawner::default();
         let sender = manual.clone();
-        let (mut app, _mock) = app_with_mock_and_scan_spawner(
-            paths,
-            cfg,
-            PlaylistsFile::default(),
-            Box::new(manual),
-        );
+        let (mut app, _mock) =
+            app_with_mock_and_scan_spawner(paths, cfg, PlaylistsFile::default(), Box::new(manual));
 
         // Start a scan that does not complete yet.
         app.apply(Action::RescanLibrary).unwrap();
@@ -1530,12 +1552,8 @@ mod tests {
 
         let manual = ManualScanSpawner::default();
         let sender = manual.clone();
-        let (mut app, _mock) = app_with_mock_and_scan_spawner(
-            paths,
-            cfg,
-            PlaylistsFile::default(),
-            Box::new(manual),
-        );
+        let (mut app, _mock) =
+            app_with_mock_and_scan_spawner(paths, cfg, PlaylistsFile::default(), Box::new(manual));
 
         // Start a rescan that does not complete yet.
         app.apply(Action::RescanLibrary).unwrap();
@@ -1654,4 +1672,3 @@ mod tests {
         );
     }
 }
-

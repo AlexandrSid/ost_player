@@ -3,7 +3,10 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("I/O error at {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 
     #[error(
         "portable app folder is not writable (data dir: {data_dir}). \
@@ -23,4 +26,3 @@ Underlying error: {source}"
 }
 
 pub type AppResult<T> = Result<T, AppError>;
-

@@ -30,4 +30,3 @@ pub fn save(paths: &AppPaths, index: &LibraryIndex) -> AppResult<()> {
     })?;
     persist::write_text_safely(&path, &serialized)
 }
-

@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, RepeatMode};
 use crate::indexer::LibraryIndex;
-use crate::player::PlayerSnapshot;
 use crate::paths::AppPaths;
+use crate::player::PlayerSnapshot;
 use crate::playlists::PlaylistsFile;
 use crate::tui::action::Screen;
 
@@ -23,7 +23,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(paths: AppPaths, cfg: AppConfig, playlists: PlaylistsFile, library: LibraryIndex) -> Self {
+    pub fn new(
+        paths: AppPaths,
+        cfg: AppConfig,
+        playlists: PlaylistsFile,
+        library: LibraryIndex,
+    ) -> Self {
         Self {
             paths,
             cfg,
@@ -46,4 +51,3 @@ impl AppState {
         }
     }
 }
-

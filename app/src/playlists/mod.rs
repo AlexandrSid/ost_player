@@ -1,7 +1,7 @@
 pub mod io;
 
-use serde::{Deserialize, Serialize};
 use serde::de;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::BTreeMap;
 
@@ -39,14 +39,18 @@ enum PlaylistFoldersCompat {
     New(Vec<FolderEntry>),
 }
 
-fn deserialize_playlist_folders_compat<'de, D>(deserializer: D) -> Result<Vec<FolderEntry>, D::Error>
+fn deserialize_playlist_folders_compat<'de, D>(
+    deserializer: D,
+) -> Result<Vec<FolderEntry>, D::Error>
 where
     D: de::Deserializer<'de>,
 {
     let v = Option::<PlaylistFoldersCompat>::deserialize(deserializer)?;
     Ok(match v {
         None => Vec::new(),
-        Some(PlaylistFoldersCompat::Old(paths)) => paths.into_iter().map(FolderEntry::new).collect(),
+        Some(PlaylistFoldersCompat::Old(paths)) => {
+            paths.into_iter().map(FolderEntry::new).collect()
+        }
         Some(PlaylistFoldersCompat::New(entries)) => entries,
     })
 }
@@ -74,8 +78,7 @@ impl PlaylistsFile {
 
     pub fn validate(&self) -> Result<(), String> {
         for (idx, p) in self.playlists.iter().enumerate() {
-            p.validate()
-                .map_err(|e| format!("playlists[{idx}]: {e}"))?;
+            p.validate().map_err(|e| format!("playlists[{idx}]: {e}"))?;
         }
         Ok(())
     }
@@ -91,4 +94,3 @@ impl Default for PlaylistsFile {
         }
     }
 }
-

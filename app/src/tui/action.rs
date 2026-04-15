@@ -43,4 +43,3 @@ pub enum Screen {
     Folders,
     NowPlaying,
 }
-

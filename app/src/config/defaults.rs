@@ -1,5 +1,7 @@
+use super::{
+    HotkeyChord, HotkeyHoldAction, HotkeyKey, HotkeyModifier, HotkeysBindings, TapHoldBinding,
+};
 use super::{HotkeysConfig, HotkeysTimings, RepeatMode, SettingsConfig};
-use super::{HotkeyChord, HotkeyKey, HotkeyModifier, HotkeysBindings, HotkeyHoldAction, TapHoldBinding};
 
 pub fn default_settings() -> SettingsConfig {
     SettingsConfig {
@@ -53,4 +55,3 @@ pub fn default_hotkeys() -> HotkeysConfig {
         },
     }
 }
-

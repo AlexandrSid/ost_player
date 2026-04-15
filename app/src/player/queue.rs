@@ -16,7 +16,12 @@ impl PlayerQueue {
         self.tracks.len()
     }
 
-    pub fn load(&mut self, tracks: Vec<PathBuf>, start_index: usize, shuffle: bool) -> Result<(), String> {
+    pub fn load(
+        &mut self,
+        tracks: Vec<PathBuf>,
+        start_index: usize,
+        shuffle: bool,
+    ) -> Result<(), String> {
         if tracks.is_empty() {
             self.tracks = Vec::new();
             self.order = Vec::new();
@@ -171,4 +176,3 @@ mod tests {
         assert!(q.set_pos_in_order(3).is_err());
     }
 }
-

@@ -1,6 +1,6 @@
+mod scan_indicator;
 mod terminal;
 mod ui;
-mod scan_indicator;
 
 pub mod action;
 pub mod app;
@@ -17,4 +17,3 @@ pub fn run(paths: AppPaths, cfg: AppConfig, playlists: PlaylistsFile) -> AppResu
     let mut app = app::TuiApp::new(paths, cfg, playlists);
     terminal::run(&mut app)
 }
-

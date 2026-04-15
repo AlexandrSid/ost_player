@@ -2,8 +2,8 @@ use crate::config::RepeatMode;
 use queue::PlayerQueue;
 use rodio::Source;
 use std::any::Any;
-use std::path::PathBuf;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,8 +22,11 @@ trait AudioSinkLike {
 trait AudioBackend {
     fn try_init(&mut self) -> Result<(), String>;
     fn create_sink(&self) -> Result<Box<dyn AudioSinkLike>, String>;
-    fn append_file(&self, sink: &mut dyn AudioSinkLike, path: &std::path::Path)
-        -> Result<Option<Duration>, String>;
+    fn append_file(
+        &self,
+        sink: &mut dyn AudioSinkLike,
+        path: &std::path::Path,
+    ) -> Result<Option<Duration>, String>;
 }
 
 #[derive(Default)]
@@ -163,7 +166,8 @@ impl PlayerHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
         let (evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
 
-        let join = thread::spawn(move || playback_thread(cmd_rx, evt_tx, initial_shuffle, initial_repeat));
+        let join =
+            thread::spawn(move || playback_thread(cmd_rx, evt_tx, initial_shuffle, initial_repeat));
 
         Self {
             cmd_tx,
@@ -201,8 +205,7 @@ impl PlayerHandle {
         let Some(j) = self.join.take() else {
             return Ok(());
         };
-        j.join()
-            .map_err(|_| "player thread panicked".to_string())
+        j.join().map_err(|_| "player thread panicked".to_string())
     }
 
     pub fn shutdown_and_join(self, timeout: Duration) -> Result<(), String> {
@@ -245,15 +248,15 @@ impl PlayerHandle {
 
         let (done_tx, done_rx) = mpsc::channel::<Result<(), String>>();
         thread::spawn(move || {
-            let res = j
-                .join()
-                .map_err(|_| "player thread panicked".to_string());
+            let res = j.join().map_err(|_| "player thread panicked".to_string());
             let _ = done_tx.send(res);
         });
 
         match done_rx.recv_timeout(timeout) {
             Ok(res) => res,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err("timed out joining player thread".to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err("timed out joining player thread".to_string())
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err("join waiter disconnected unexpectedly".to_string())
             }
@@ -351,7 +354,9 @@ impl Engine {
     fn emit_snapshot(&self, evt_tx: &mpsc::Sender<PlayerEvent>) {
         let queue_pos = self.queue.pos_in_order();
         let queue_len = self.queue.order_len();
-        let track_position = self.current_sink_pos().unwrap_or_else(|| Duration::from_secs(0));
+        let track_position = self
+            .current_sink_pos()
+            .unwrap_or_else(|| Duration::from_secs(0));
         let _ = evt_tx.send(PlayerEvent::Snapshot(PlayerSnapshot {
             status: self.status,
             current_path: self.current_path.clone(),
@@ -381,7 +386,10 @@ impl Engine {
 
     fn on_command(&mut self, cmd: PlayerCommand) -> Result<(), String> {
         match cmd {
-            PlayerCommand::LoadQueue { tracks, start_index } => {
+            PlayerCommand::LoadQueue {
+                tracks,
+                start_index,
+            } => {
                 self.queue.load(tracks, start_index, self.shuffle)?;
                 if self.queue.is_empty() {
                     self.stop();
@@ -411,18 +419,14 @@ impl Engine {
         }
     }
 
-    fn current_track_index(&self) -> Option<usize> {
-        self.queue.current_index()
-    }
-
     fn toggle_play_pause(&mut self) -> Result<(), String> {
         match self.status {
             PlaybackStatus::Stopped => {
                 // If we have a queue and a current position, start it. Otherwise, no-op.
-                let Some(pos) =
-                    self.queue
-                        .pos_in_order()
-                        .or_else(|| (!self.queue.is_empty()).then_some(0))
+                let Some(pos) = self
+                    .queue
+                    .pos_in_order()
+                    .or_else(|| (!self.queue.is_empty()).then_some(0))
                 else {
                     return Ok(());
                 };
@@ -490,7 +494,10 @@ impl Engine {
         match self.repeat {
             RepeatMode::One => {
                 if let Some(pos) = self.queue.pos_in_order() {
-                    if self.play_from_pos_with_skip(pos, SeekDirection::Forward).is_ok() {
+                    if self
+                        .play_from_pos_with_skip(pos, SeekDirection::Forward)
+                        .is_ok()
+                    {
                         return true;
                     }
                 }
@@ -799,7 +806,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(e.status, PlaybackStatus::Playing);
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
 
         e.on_command(PlayerCommand::Stop).unwrap();
         assert_eq!(e.status, PlaybackStatus::Stopped);
@@ -828,7 +838,10 @@ mod tests {
         .unwrap();
         e.on_command(PlayerCommand::Next).unwrap();
         assert_eq!(e.status, PlaybackStatus::Playing);
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
     }
 
     #[test]
@@ -839,14 +852,20 @@ mod tests {
             start_index: 0,
         })
         .unwrap();
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
 
         // We can call the deterministic end-of-track transition directly without
         // depending on real audio output / sink state.
         let changed = e.advance_after_end();
         assert!(changed);
         assert_eq!(e.status, PlaybackStatus::Playing);
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
     }
 
     #[test]
@@ -866,11 +885,17 @@ mod tests {
             start_index: 0,
         })
         .unwrap();
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
 
         e.on_command(PlayerCommand::Prev).unwrap();
         assert_eq!(e.status, PlaybackStatus::Playing);
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
     }
 
     #[test]
@@ -881,7 +906,10 @@ mod tests {
             start_index: 1,
         })
         .unwrap();
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("b.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("b.ogg"))
+        );
 
         e.on_command(PlayerCommand::Next).unwrap();
         assert_eq!(e.status, PlaybackStatus::Stopped);
@@ -896,7 +924,10 @@ mod tests {
             start_index: 1,
         })
         .unwrap();
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("b.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("b.ogg"))
+        );
 
         let changed = e.advance_after_end();
         assert!(changed);
@@ -918,14 +949,20 @@ mod tests {
             start_index: 0,
         })
         .unwrap();
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
 
         let before_appends = append_calls.load(std::sync::atomic::Ordering::Relaxed);
         let changed = e.on_tick();
         assert!(changed);
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("b.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("b.ogg"))
+        );
         let after_appends = append_calls.load(std::sync::atomic::Ordering::Relaxed);
-        assert!(after_appends >= before_appends + 1);
+        assert!(after_appends > before_appends);
     }
 
     #[test]
@@ -939,7 +976,10 @@ mod tests {
             start_index: 0,
         })
         .unwrap();
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
         assert_eq!(e.queue.pos_in_order(), Some(0));
 
         let mut bad = backend_ok();
@@ -949,7 +989,10 @@ mod tests {
 
         let err = e.play_at_pos(1).unwrap_err();
         assert!(err.contains("decode failed"));
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("a.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
         assert_eq!(e.queue.pos_in_order(), Some(0));
         assert_eq!(e.status, PlaybackStatus::Playing);
     }
@@ -967,7 +1010,10 @@ mod tests {
 
         // First track fails to decode -> should skip to next playable track.
         assert_eq!(e.status, PlaybackStatus::Playing);
-        assert_eq!(e.current_path.as_deref(), Some(std::path::Path::new("b.ogg")));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("b.ogg"))
+        );
         assert_eq!(e.queue.pos_in_order(), Some(1));
         // Option A (FIX-006 semantics): last_error is set on failure, but clears on the next
         // successful track start (so after skipping to b.ogg it should be None).
@@ -1006,7 +1052,10 @@ mod tests {
             "expected decode failure, got: {err:?}"
         );
         assert!(
-            e.last_error.as_deref().unwrap_or_default().contains("decode failed"),
+            e.last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("decode failed"),
             "expected last_error to be set after failures, got: {:?}",
             e.last_error
         );

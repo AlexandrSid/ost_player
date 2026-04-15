@@ -155,4 +155,3 @@ settings:
         assert!(cfg.folders[1].root_only);
     }
 }
-

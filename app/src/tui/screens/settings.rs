@@ -76,4 +76,3 @@ impl SettingsScreen {
 pub struct SettingsView<'a> {
     pub min_size_input: Option<&'a TextInput>,
 }
-

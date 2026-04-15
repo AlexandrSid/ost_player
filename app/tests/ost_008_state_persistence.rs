@@ -82,7 +82,10 @@ last_index: { tracks_total: 9, issues_total: 1 }
     let s = state::load_or_create(&paths).unwrap();
     assert!(paths.state_path.exists(), "final should be restored");
     assert!(!bak.exists(), "bak should be moved into final");
-    assert!(tmp.exists(), "tmp should remain untouched when bak was restored");
+    assert!(
+        tmp.exists(),
+        "tmp should remain untouched when bak was restored"
+    );
     assert_eq!(s.last_index.unwrap().tracks_total, 9);
 }
 
@@ -105,7 +108,10 @@ last_index:
     .unwrap();
 
     let s = state::load_or_create(&paths).unwrap();
-    assert!(paths.state_path.exists(), "final should be restored from tmp");
+    assert!(
+        paths.state_path.exists(),
+        "final should be restored from tmp"
+    );
     assert!(!tmp.exists(), "tmp should be moved into final");
     assert_eq!(s.last_index.unwrap().tracks_total, 2);
 }
@@ -120,7 +126,10 @@ fn load_or_create_returns_config_error_on_invalid_yaml() {
     let err = state::load_or_create(&paths).unwrap_err();
     match err {
         AppError::Config { message } => {
-            assert!(message.contains("failed to parse"), "message was: {message}");
+            assert!(
+                message.contains("failed to parse"),
+                "message was: {message}"
+            );
             assert!(
                 message.contains("state.yaml"),
                 "message should mention file name; message was: {message}"
@@ -129,4 +138,3 @@ fn load_or_create_returns_config_error_on_invalid_yaml() {
         other => panic!("expected AppError::Config, got {other:?}"),
     }
 }
-

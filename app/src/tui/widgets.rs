@@ -132,7 +132,11 @@ impl TextInput {
 
         let start_byte = byte_index_for_grapheme_pos(&self.value, start_g);
         let end_byte = byte_index_for_grapheme_pos(&self.value, end_g);
-        let visible = self.value.get(start_byte..end_byte).unwrap_or("").to_string();
+        let visible = self
+            .value
+            .get(start_byte..end_byte)
+            .unwrap_or("")
+            .to_string();
 
         let cursor_x_cells = (cursor_cells - cum_cells[start_g]).min(max_cursor_x);
         (visible, cursor_x_cells as u16)
@@ -348,7 +352,10 @@ mod tests {
             .chars()
             .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
             .sum();
-        assert!(visible_cells <= width as usize, "visible should be clamped to width cells");
+        assert!(
+            visible_cells <= width as usize,
+            "visible should be clamped to width cells"
+        );
         assert!(cursor_x < width, "cursor_x should be within 0..width-1");
 
         // Cursor should be within the window and mapped in terminal cells, not chars.
@@ -582,8 +589,9 @@ mod tests {
         let mut ti2 = TextInput::new("t", "a👩‍💻b", "h");
         ti2.cursor = ti2.value.graphemes(true).count();
         let (_visible, cursor_x) = ti2.display_for_width(20);
-        let expected_cells =
-            UnicodeWidthStr::width("a") + UnicodeWidthStr::width("👩‍💻") + UnicodeWidthStr::width("b");
+        let expected_cells = UnicodeWidthStr::width("a")
+            + UnicodeWidthStr::width("👩‍💻")
+            + UnicodeWidthStr::width("b");
         assert_eq!(cursor_x, expected_cells as u16);
 
         // Scrolling should never split the grapheme cluster.
@@ -594,4 +602,3 @@ mod tests {
         );
     }
 }
-

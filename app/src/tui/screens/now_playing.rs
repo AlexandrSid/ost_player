@@ -13,7 +13,9 @@ impl NowPlayingScreen {
 
     pub fn on_key(&mut self, _state: &AppState, key: KeyEvent) -> AppResult<Option<Action>> {
         Ok(match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => Some(Action::Navigate(Screen::MainMenu)),
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => {
+                Some(Action::Navigate(Screen::MainMenu))
+            }
             KeyCode::Char(' ') | KeyCode::Enter => Some(Action::PlayerTogglePlayPause),
             KeyCode::Char('n') | KeyCode::Right => Some(Action::PlayerNext),
             KeyCode::Char('p') | KeyCode::Left => Some(Action::PlayerPrev),
@@ -28,4 +30,3 @@ impl NowPlayingScreen {
         Ok(None)
     }
 }
-

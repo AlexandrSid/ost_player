@@ -6,6 +6,9 @@ fn main() -> anyhow::Result<()> {
 
     let _log_guards = logging::init(&paths)?;
 
+    #[cfg(windows)]
+    ost_player::windows_icon::best_effort_set_console_window_icon_from_resource_id(1);
+
     let cfg = config::io::load_or_create(&paths)?;
     let pls = playlists::io::load_or_create(&paths)?;
     tracing::info!(
@@ -20,4 +23,3 @@ fn main() -> anyhow::Result<()> {
     tui::run(paths, cfg, pls)?;
     Ok(())
 }
-

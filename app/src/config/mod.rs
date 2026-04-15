@@ -1,23 +1,18 @@
 mod defaults;
 pub mod io;
 
-use serde::{Deserialize, Serialize};
 use serde::de;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RepeatMode {
+    #[default]
     Off,
     All,
     One,
-}
-
-impl Default for RepeatMode {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,25 +359,27 @@ settings:
 
     #[test]
     fn normalized_dedup_keeps_first_occurrence_and_order_stable_for_folders() {
-        let mut cfg = AppConfig::default();
-        cfg.folders = vec![
-            FolderEntry {
-                path: "C:\\Music".to_string(),
-                root_only: false,
-            },
-            FolderEntry {
-                path: "C:\\Music".to_string(),
-                root_only: true,
-            },
-            FolderEntry {
-                path: "D:\\OST".to_string(),
-                root_only: true,
-            },
-            FolderEntry {
-                path: "C:\\Music".to_string(),
-                root_only: false,
-            },
-        ];
+        let cfg = AppConfig {
+            folders: vec![
+                FolderEntry {
+                    path: "C:\\Music".to_string(),
+                    root_only: false,
+                },
+                FolderEntry {
+                    path: "C:\\Music".to_string(),
+                    root_only: true,
+                },
+                FolderEntry {
+                    path: "D:\\OST".to_string(),
+                    root_only: true,
+                },
+                FolderEntry {
+                    path: "C:\\Music".to_string(),
+                    root_only: false,
+                },
+            ],
+            ..Default::default()
+        };
 
         let normalized = cfg.normalized();
         assert_eq!(

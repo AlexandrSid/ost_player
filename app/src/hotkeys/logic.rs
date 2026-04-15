@@ -94,7 +94,11 @@ impl HotkeysEngine {
         self.bindings.len()
     }
 
-    pub fn chord_matches(chord: &HotkeyChord, key: HotkeyKey, down_mods: &HashSet<HotkeyModifier>) -> bool {
+    pub fn chord_matches(
+        chord: &HotkeyChord,
+        key: HotkeyKey,
+        down_mods: &HashSet<HotkeyModifier>,
+    ) -> bool {
         chord.key == key && chord.modifiers.iter().all(|m| down_mods.contains(m))
     }
 
@@ -107,7 +111,12 @@ impl HotkeysEngine {
         }
     }
 
-    fn handle_down(&mut self, now_ms: u64, key: HotkeyKey, down_mods: &HashSet<HotkeyModifier>) -> Vec<Action> {
+    fn handle_down(
+        &mut self,
+        now_ms: u64,
+        key: HotkeyKey,
+        down_mods: &HashSet<HotkeyModifier>,
+    ) -> Vec<Action> {
         // Start tracking only if there is a matching binding.
         let Some(binding) = self
             .bindings
@@ -137,7 +146,12 @@ impl HotkeysEngine {
         Vec::new()
     }
 
-    fn handle_up(&mut self, now_ms: u64, key: HotkeyKey, down_mods: &HashSet<HotkeyModifier>) -> Vec<Action> {
+    fn handle_up(
+        &mut self,
+        now_ms: u64,
+        key: HotkeyKey,
+        down_mods: &HashSet<HotkeyModifier>,
+    ) -> Vec<Action> {
         let Some(press) = self.presses.remove(&key) else {
             return Vec::new();
         };
@@ -163,14 +177,22 @@ impl HotkeysEngine {
     }
 
     /// Advance internal timers. Returns hold-repeat actions that should be emitted at `now_ms`.
-    pub fn tick(&mut self, now_ms: u64, modifiers_down: &HashMap<HotkeyKey, HashSet<HotkeyModifier>>) -> Vec<Action> {
+    pub fn tick(
+        &mut self,
+        now_ms: u64,
+        modifiers_down: &HashMap<HotkeyKey, HashSet<HotkeyModifier>>,
+    ) -> Vec<Action> {
         let mut out = Vec::new();
 
         // Iterate over a stable key list so we can mutate `presses`.
         let keys: Vec<HotkeyKey> = self.presses.keys().copied().collect();
         for key in keys {
-            let Some(st) = self.presses.get_mut(&key) else { continue };
-            let Some(next_ms) = st.next_hold_or_repeat_ms else { continue };
+            let Some(st) = self.presses.get_mut(&key) else {
+                continue;
+            };
+            let Some(next_ms) = st.next_hold_or_repeat_ms else {
+                continue;
+            };
             if now_ms < next_ms {
                 continue;
             }
@@ -207,7 +229,10 @@ impl HotkeysEngine {
     }
 }
 
-fn hold_action_to_action(hold: &HotkeyHoldAction, timings: &crate::config::HotkeysTimings) -> Action {
+fn hold_action_to_action(
+    hold: &HotkeyHoldAction,
+    timings: &crate::config::HotkeysTimings,
+) -> Action {
     match hold {
         HotkeyHoldAction::SeekStep { direction } => {
             let seconds = (*direction) * timings.seek_step_seconds as i64;
@@ -220,15 +245,18 @@ fn hold_action_to_action(hold: &HotkeyHoldAction, timings: &crate::config::Hotke
 mod tests {
     use super::*;
     use crate::config::{
-        HotkeyChord, HotkeyHoldAction, HotkeyKey, HotkeyModifier, HotkeysBindings, HotkeysConfig, HotkeysTimings,
-        TapHoldBinding,
+        HotkeyChord, HotkeyHoldAction, HotkeyKey, HotkeyModifier, HotkeysBindings, HotkeysConfig,
+        HotkeysTimings, TapHoldBinding,
     };
 
     fn mods(ms: &[HotkeyModifier]) -> HashSet<HotkeyModifier> {
         ms.iter().copied().collect()
     }
 
-    fn key_mods_map(key: HotkeyKey, ms: &[HotkeyModifier]) -> HashMap<HotkeyKey, HashSet<HotkeyModifier>> {
+    fn key_mods_map(
+        key: HotkeyKey,
+        ms: &[HotkeyModifier],
+    ) -> HashMap<HotkeyKey, HashSet<HotkeyModifier>> {
         let mut m = HashMap::new();
         m.insert(key, mods(ms));
         m
@@ -236,18 +264,19 @@ mod tests {
 
     #[test]
     fn tap_emits_action_on_key_up_before_hold_threshold() {
-        let mut cfg = HotkeysConfig::default();
-        cfg.timings = HotkeysTimings {
-            hold_threshold_ms: 300,
-            repeat_interval_ms: 250,
-            seek_step_seconds: 5,
-        };
-        cfg.bindings = HotkeysBindings {
-            play_pause: Some(HotkeyChord {
-                modifiers: vec![HotkeyModifier::Ctrl],
-                key: HotkeyKey::Space,
-            }),
-            ..Default::default()
+        let cfg = HotkeysConfig {
+            timings: HotkeysTimings {
+                hold_threshold_ms: 300,
+                repeat_interval_ms: 250,
+                seek_step_seconds: 5,
+            },
+            bindings: HotkeysBindings {
+                play_pause: Some(HotkeyChord {
+                    modifiers: vec![HotkeyModifier::Ctrl],
+                    key: HotkeyKey::Space,
+                }),
+                ..Default::default()
+            },
         };
 
         let mut e = HotkeysEngine::from_config(&cfg);
@@ -272,21 +301,22 @@ mod tests {
 
     #[test]
     fn hold_emits_seek_actions_on_tick_and_never_taps() {
-        let mut cfg = HotkeysConfig::default();
-        cfg.timings = HotkeysTimings {
-            hold_threshold_ms: 300,
-            repeat_interval_ms: 250,
-            seek_step_seconds: 5,
-        };
-        cfg.bindings = HotkeysBindings {
-            next: Some(TapHoldBinding {
-                chord: HotkeyChord {
-                    modifiers: vec![HotkeyModifier::Ctrl],
-                    key: HotkeyKey::Right,
-                },
-                hold: Some(HotkeyHoldAction::SeekStep { direction: 1 }),
-            }),
-            ..Default::default()
+        let cfg = HotkeysConfig {
+            timings: HotkeysTimings {
+                hold_threshold_ms: 300,
+                repeat_interval_ms: 250,
+                seek_step_seconds: 5,
+            },
+            bindings: HotkeysBindings {
+                next: Some(TapHoldBinding {
+                    chord: HotkeyChord {
+                        modifiers: vec![HotkeyModifier::Ctrl],
+                        key: HotkeyKey::Right,
+                    },
+                    hold: Some(HotkeyHoldAction::SeekStep { direction: 1 }),
+                }),
+                ..Default::default()
+            },
         };
 
         let mut e = HotkeysEngine::from_config(&cfg);
@@ -330,21 +360,22 @@ mod tests {
 
     #[test]
     fn release_after_threshold_without_tick_does_not_tap() {
-        let mut cfg = HotkeysConfig::default();
-        cfg.timings = HotkeysTimings {
-            hold_threshold_ms: 300,
-            repeat_interval_ms: 250,
-            seek_step_seconds: 5,
-        };
-        cfg.bindings = HotkeysBindings {
-            next: Some(TapHoldBinding {
-                chord: HotkeyChord {
-                    modifiers: vec![HotkeyModifier::Ctrl],
-                    key: HotkeyKey::Right,
-                },
-                hold: Some(HotkeyHoldAction::SeekStep { direction: 1 }),
-            }),
-            ..Default::default()
+        let cfg = HotkeysConfig {
+            timings: HotkeysTimings {
+                hold_threshold_ms: 300,
+                repeat_interval_ms: 250,
+                seek_step_seconds: 5,
+            },
+            bindings: HotkeysBindings {
+                next: Some(TapHoldBinding {
+                    chord: HotkeyChord {
+                        modifiers: vec![HotkeyModifier::Ctrl],
+                        key: HotkeyKey::Right,
+                    },
+                    hold: Some(HotkeyHoldAction::SeekStep { direction: 1 }),
+                }),
+                ..Default::default()
+            },
         };
 
         let mut e = HotkeysEngine::from_config(&cfg);
@@ -367,4 +398,3 @@ mod tests {
         assert!(up.is_empty());
     }
 }
-

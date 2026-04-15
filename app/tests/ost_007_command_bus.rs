@@ -104,11 +104,14 @@ fn terminal_like_drain_applies_actions_in_order_and_stops_on_quit() {
     let quit = drain_and_apply_until_quit(&mut app, &bus);
     assert!(quit, "quit should be observed by drain loop");
 
-    assert_eq!(app.applied.len(), 2, "actions after Quit must not be applied");
+    assert_eq!(
+        app.applied.len(),
+        2,
+        "actions after Quit must not be applied"
+    );
     match &app.applied[0] {
         Action::SetStatus(s) => assert_eq!(s, "before_quit"),
         _ => panic!("expected first applied action to be SetStatus"),
     }
     assert!(matches!(app.applied[1], Action::Quit));
 }
-

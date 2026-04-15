@@ -69,9 +69,8 @@ fn decode_file_via_ffmpeg(path: &Path) -> Result<rodio::Decoder<BufReader<BoxedR
         .stderr
         .take()
         .ok_or_else(|| "failed to capture ffmpeg stderr".to_string())?;
-    let stderr_reader = thread::spawn(move || {
-        read_to_end_capped(&mut stderr_pipe, FFMPEG_STDERR_CAP_BYTES)
-    });
+    let stderr_reader =
+        thread::spawn(move || read_to_end_capped(&mut stderr_pipe, FFMPEG_STDERR_CAP_BYTES));
 
     let status = child
         .wait()
@@ -94,8 +93,12 @@ stderr (trimmed):\n{stderr}",
     }
 
     let temp_path = tmp.into_temp_path();
-    let file = File::open(&temp_path)
-        .map_err(|e| format!("failed to open ffmpeg WAV temp file for `{}`: {e}", path.display()))?;
+    let file = File::open(&temp_path).map_err(|e| {
+        format!(
+            "failed to open ffmpeg WAV temp file for `{}`: {e}",
+            path.display()
+        )
+    })?;
     let reader: BoxedReadSeek = Box::new(TempFileReadSeek::new(file, temp_path));
     let reader = BufReader::new(reader);
     rodio::Decoder::new(reader).map_err(|e| {
@@ -164,8 +167,14 @@ fn is_ogg(path: &Path) -> bool {
 }
 
 fn find_ffmpeg() -> Result<(PathBuf, Vec<String>), String> {
-    let exe_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let exe_name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
     let path_env = std::env::var_os("PATH");
     find_ffmpeg_from(exe_name, exe_dir.as_deref(), path_env.as_deref())
 }
@@ -197,10 +206,7 @@ fn find_ffmpeg_from(
 
         if let Some(parent) = dir.parent() {
             let tools_next_to_exe = parent.join(&tools_rel);
-            searched.push(format!(
-                "sibling tools: `{}`",
-                tools_next_to_exe.display()
-            ));
+            searched.push(format!("sibling tools: `{}`", tools_next_to_exe.display()));
             if tools_next_to_exe.is_file() {
                 return Ok((tools_next_to_exe, searched));
             }
@@ -219,7 +225,11 @@ fn find_ffmpeg_from(
     ))
 }
 
-fn find_in_path(exe_name: &str, path_env: Option<&OsStr>, searched: &mut Vec<String>) -> Option<PathBuf> {
+fn find_in_path(
+    exe_name: &str,
+    path_env: Option<&OsStr>,
+    searched: &mut Vec<String>,
+) -> Option<PathBuf> {
     let path_env = path_env?;
     searched.push(format!("PATH lookup for `{exe_name}`"));
 
@@ -301,11 +311,7 @@ fn tail_chars(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     let skip = total - max_chars;
-    let start = s
-        .char_indices()
-        .nth(skip)
-        .map(|(i, _)| i)
-        .unwrap_or(0);
+    let start = s.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
     s[start..].to_string()
 }
 
@@ -375,7 +381,11 @@ mod tests {
         let path_b = tempfile::tempdir().unwrap();
 
         let path_env = std::env::join_paths([path_a.path(), path_b.path()]).unwrap();
-        let exe_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+        let exe_name = if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        };
 
         let err = find_ffmpeg_from(exe_name, Some(exe_dir.path()), Some(path_env.as_os_str()))
             .unwrap_err();
@@ -389,10 +399,16 @@ mod tests {
         let idx_near_tools = err.find("near binary tools:").unwrap();
         let idx_path_lookup = err.find("PATH lookup").unwrap();
         let idx_path_dir_a = err
-            .find(&format!("PATH dir: `{}`", path_a.path().join(exe_name).display()))
+            .find(&format!(
+                "PATH dir: `{}`",
+                path_a.path().join(exe_name).display()
+            ))
             .unwrap();
         let idx_path_dir_b = err
-            .find(&format!("PATH dir: `{}`", path_b.path().join(exe_name).display()))
+            .find(&format!(
+                "PATH dir: `{}`",
+                path_b.path().join(exe_name).display()
+            ))
             .unwrap();
 
         assert!(idx_near < idx_near_tools);
@@ -406,7 +422,11 @@ mod tests {
         let exe_dir = tempfile::tempdir().unwrap();
         let path_dir = tempfile::tempdir().unwrap();
 
-        let exe_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+        let exe_name = if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        };
 
         // Create ffmpeg next to "binary".
         let near = exe_dir.path().join(exe_name);
@@ -422,7 +442,10 @@ mod tests {
 
         assert_eq!(found, near);
         assert!(searched.iter().any(|s| s.contains("near binary:")));
-        assert!(!searched.iter().any(|s| s.contains("PATH lookup")), "PATH should not be consulted once found near binary");
+        assert!(
+            !searched.iter().any(|s| s.contains("PATH lookup")),
+            "PATH should not be consulted once found near binary"
+        );
     }
 
     #[test]

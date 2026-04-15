@@ -1,8 +1,8 @@
+use crate::player::PlaybackStatus;
 use crate::tui::action::Screen;
 use crate::tui::app::TuiApp;
 use crate::tui::scan_indicator::scan_mode_indicator_fixed;
 use crate::tui::widgets::{ConfirmDialog, TextInput};
-use crate::player::PlaybackStatus;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -79,7 +79,9 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
 
     let mut list_state = ratatui::widgets::ListState::default();
     if !v.folders.is_empty() {
-        list_state.select(Some(v.selected_folder.min(v.folders.len().saturating_sub(1))));
+        list_state.select(Some(
+            v.selected_folder.min(v.folders.len().saturating_sub(1)),
+        ));
     }
     frame.render_stateful_widget(list, cols[0], &mut list_state);
 
@@ -194,24 +196,19 @@ fn draw_playlists(frame: &mut Frame, area: Rect, app: &TuiApp) {
 
     if let Some(input) = v.create_input.or(v.rename_input) {
         draw_text_input_modal(frame, input);
-    } else if let Some(confirm) = v.confirm_delete
-        .or(v.confirm_overwrite)
-        .or(v.confirm_load)
-    {
+    } else if let Some(confirm) = v.confirm_delete.or(v.confirm_overwrite).or(v.confirm_load) {
         draw_confirm_modal(frame, confirm);
     }
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let state = &app.state;
-    let status = state.status.clone().unwrap_or_else(|| {
-        match state.screen {
-            Screen::MainMenu => "Ready. Choose an action.".to_string(),
-            Screen::Settings => "Settings are auto-saved.".to_string(),
-            Screen::Playlists => "Playlists are auto-saved.".to_string(),
-            Screen::NowPlaying => "Now Playing.".to_string(),
-            Screen::Folders => "Not implemented yet.".to_string(),
-        }
+    let status = state.status.clone().unwrap_or_else(|| match state.screen {
+        Screen::MainMenu => "Ready. Choose an action.".to_string(),
+        Screen::Settings => "Settings are auto-saved.".to_string(),
+        Screen::Playlists => "Playlists are auto-saved.".to_string(),
+        Screen::NowPlaying => "Now Playing.".to_string(),
+        Screen::Folders => "Not implemented yet.".to_string(),
     });
 
     let text = format!(
@@ -219,7 +216,11 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
         status,
         state.library.tracks.len(),
         state.cfg.settings.min_size_bytes,
-        if state.cfg.settings.shuffle { "on" } else { "off" },
+        if state.cfg.settings.shuffle {
+            "on"
+        } else {
+            "off"
+        },
         state.repeat_label()
     );
 
@@ -249,7 +250,11 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &TuiApp) {
         .player
         .current_path
         .as_ref()
-        .and_then(|p| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()))
+        .and_then(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| "(none)".to_string());
 
     let (pos_1, total) = match (state.player.queue_pos, state.player.queue_len) {
@@ -264,10 +269,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &TuiApp) {
         .map(format_duration)
         .unwrap_or_else(|| "--:--".to_string());
 
-    let last_error = state
-        .last_error
-        .as_deref()
-        .unwrap_or("(none)");
+    let last_error = state.last_error.as_deref().unwrap_or("(none)");
 
     let text = format!(
         "Now Playing\n\nStatus: {status}\nTrack:  {name}\nPath:   {path}\n\nQueue:  {pos_1}/{total}\nShuffle: {}\nRepeat: {}\nTime:   {track_pos} / {track_dur}\n\nLast error:\n  {last_error}\n\nKeys:\n  Space/Enter  play/pause\n  n / Right    next\n  p / Left     previous\n  x            stop\n  s            toggle shuffle\n  r            cycle repeat\n  Esc/q/m      back to main menu",
@@ -303,7 +305,14 @@ fn draw_text_input_modal(frame: &mut Frame, input: &TextInput) {
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(3), Constraint::Length(2)].as_ref())
+        .constraints(
+            [
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Length(2),
+            ]
+            .as_ref(),
+        )
         .margin(1)
         .split(area);
 
@@ -425,7 +434,14 @@ mod tests {
         let area = centered_rect(70, 40, frame_area);
         let inner = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Length(3), Constraint::Length(2)].as_ref())
+            .constraints(
+                [
+                    Constraint::Length(2),
+                    Constraint::Length(3),
+                    Constraint::Length(2),
+                ]
+                .as_ref(),
+            )
             .margin(1)
             .split(area);
         let input_block = Block::default().borders(Borders::ALL).title("Input");
@@ -466,10 +482,15 @@ mod tests {
             let line = text
                 .lines()
                 .find(|l| l.contains(phrase))
-                .unwrap_or_else(|| panic!("expected to render an Actions line containing {phrase:?}"));
-            let first = line.chars().find(|c| c.is_ascii_digit()).unwrap_or_else(|| {
-                panic!("expected action line for {phrase:?} to contain a digit; got: {line:?}")
-            });
+                .unwrap_or_else(|| {
+                    panic!("expected to render an Actions line containing {phrase:?}")
+                });
+            let first = line
+                .chars()
+                .find(|c| c.is_ascii_digit())
+                .unwrap_or_else(|| {
+                    panic!("expected action line for {phrase:?} to contain a digit; got: {line:?}")
+                });
             assert!(
                 first.is_ascii_digit(),
                 "expected action line for {phrase:?} to begin with a digit after trimming; got: {line:?}"
@@ -481,17 +502,19 @@ mod tests {
     fn main_menu_folder_lines_render_root_only_symbol_before_path() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
-        let mut cfg = AppConfig::default();
-        cfg.folders = vec![
-            FolderEntry {
-                path: "C:\\Music".to_string(),
-                root_only: true,
-            },
-            FolderEntry {
-                path: "C:\\Games".to_string(),
-                root_only: false,
-            },
-        ];
+        let cfg = AppConfig {
+            folders: vec![
+                FolderEntry {
+                    path: "C:\\Music".to_string(),
+                    root_only: true,
+                },
+                FolderEntry {
+                    path: "C:\\Games".to_string(),
+                    root_only: false,
+                },
+            ],
+            ..Default::default()
+        };
         let folders = cfg.folders.clone();
 
         let mut app = TuiApp::new(paths, cfg, PlaylistsFile::default());
@@ -541,7 +564,9 @@ mod tests {
             let line = text
                 .lines()
                 .find(|l| l.contains(folder.path.as_str()))
-                .unwrap_or_else(|| panic!("expected to render a line containing {:?}", folder.path));
+                .unwrap_or_else(|| {
+                    panic!("expected to render a line containing {:?}", folder.path)
+                });
             let want = scan_mode_indicator_fixed(folder.root_only);
             let other = scan_mode_indicator_fixed(!folder.root_only);
             assert!(
@@ -562,8 +587,9 @@ mod tests {
 
         let input_value = "C:\\Music";
         let input = TextInput::new("Add folder", input_value, "Enter to submit");
-        let expected_visible =
-            input.display_for_width(text_input_modal_content_width(Rect::new(0, 0, 80, 24))).0;
+        let expected_visible = input
+            .display_for_width(text_input_modal_content_width(Rect::new(0, 0, 80, 24)))
+            .0;
 
         terminal.draw(|f| draw_text_input_modal(f, &input)).unwrap();
         let text = buffer_as_text(terminal.backend().buffer());
@@ -616,12 +642,18 @@ mod tests {
         let text = buffer_as_text(terminal.backend().buffer());
 
         // No placeholder behavior exists yet; this just asserts the modal is present and labeled.
-        assert!(text.contains("Add folder"), "expected title to render; buffer was:\n{text}");
+        assert!(
+            text.contains("Add folder"),
+            "expected title to render; buffer was:\n{text}"
+        );
         assert!(
             text.contains("Enter to submit"),
             "expected help text to render; buffer was:\n{text}"
         );
-        assert!(text.contains("Input"), "expected input box label; buffer was:\n{text}");
+        assert!(
+            text.contains("Input"),
+            "expected input box label; buffer was:\n{text}"
+        );
     }
 
     #[test]
@@ -629,7 +661,10 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        let underlay = (0..24).map(|_| "X".repeat(80)).collect::<Vec<_>>().join("\n");
+        let underlay = (0..24)
+            .map(|_| "X".repeat(80))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let confirm = ConfirmDialog::new("Confirm remove?", "Enter=yes  Esc=no");
         terminal
@@ -655,4 +690,3 @@ mod tests {
         }
     }
 }
-

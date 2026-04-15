@@ -40,7 +40,14 @@ impl CommandBus {
     }
 
     pub fn emit_action(&self, source: CommandSource, action: Action) {
-        let _ = self.tx.send(BusMessage::Command(CommandEnvelope { action, source }));
+        let _ = self
+            .tx
+            .send(BusMessage::Command(CommandEnvelope { action, source }));
     }
 }
 
+impl Default for CommandBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}

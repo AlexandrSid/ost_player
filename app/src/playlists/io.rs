@@ -169,4 +169,3 @@ playlists:
         assert!(y.contains("root_only: false"));
     }
 }
-

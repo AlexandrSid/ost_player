@@ -7,4 +7,3 @@ pub use main_menu::MainMenuScreen;
 pub use now_playing::NowPlayingScreen;
 pub use playlists::PlaylistsScreen;
 pub use settings::SettingsScreen;
-

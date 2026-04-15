@@ -86,7 +86,9 @@ impl MainMenuScreen {
             KeyCode::Char('6') | KeyCode::Char('p') => Some(Action::Navigate(Screen::Playlists)),
             KeyCode::Char('7') | KeyCode::Char('r') => {
                 if state.cfg.folders.is_empty() {
-                    Some(Action::SetStatus("no folders configured to scan".to_string()))
+                    Some(Action::SetStatus(
+                        "no folders configured to scan".to_string(),
+                    ))
                 } else {
                     Some(Action::RescanLibrary)
                 }
@@ -139,9 +141,16 @@ mod tests {
 
     fn make_state(base_dir: &Path, folders: Vec<FolderEntry>) -> AppState {
         let paths = paths_for(base_dir);
-        let mut cfg = AppConfig::default();
-        cfg.folders = folders;
-        AppState::new(paths, cfg, PlaylistsFile::default(), LibraryIndex::default())
+        let cfg = AppConfig {
+            folders,
+            ..Default::default()
+        };
+        AppState::new(
+            paths,
+            cfg,
+            PlaylistsFile::default(),
+            LibraryIndex::default(),
+        )
     }
 
     fn key(ch: char) -> KeyEvent {
@@ -157,14 +166,15 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let mut state = make_state(
             td.path(),
-            vec![FolderEntry::new("A".to_string()), FolderEntry::new("B".to_string())],
+            vec![
+                FolderEntry::new("A".to_string()),
+                FolderEntry::new("B".to_string()),
+            ],
         );
         state.main_selected_folder = 1;
 
         let mut screen = MainMenuScreen::default();
-        let action = screen
-            .on_key(&state, key('t'))
-            .unwrap();
+        let action = screen.on_key(&state, key('t')).unwrap();
 
         assert_eq!(action, Some(Action::ToggleFolderRootOnlyAt(1)));
     }
@@ -174,14 +184,15 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let mut state = make_state(
             td.path(),
-            vec![FolderEntry::new("A".to_string()), FolderEntry::new("B".to_string())],
+            vec![
+                FolderEntry::new("A".to_string()),
+                FolderEntry::new("B".to_string()),
+            ],
         );
         state.main_selected_folder = 1;
 
         let mut screen = MainMenuScreen::default();
-        let action = screen
-            .on_key(&state, key('3'))
-            .unwrap();
+        let action = screen.on_key(&state, key('3')).unwrap();
 
         assert_eq!(action, Some(Action::ToggleFolderRootOnlyAt(1)));
     }
@@ -192,9 +203,7 @@ mod tests {
         let state = make_state(td.path(), vec![]);
 
         let mut screen = MainMenuScreen::default();
-        let action = screen
-            .on_key(&state, key('4'))
-            .unwrap();
+        let action = screen.on_key(&state, key('4')).unwrap();
 
         assert_eq!(
             action,
@@ -225,7 +234,10 @@ mod tests {
 
         let mut screen = MainMenuScreen::default();
         let action = screen
-            .on_key(&state, KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()))
+            .on_key(
+                &state,
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()),
+            )
             .unwrap();
 
         assert_eq!(
@@ -532,9 +544,7 @@ mod tests {
         let state = make_state(td.path(), vec![]);
 
         let mut screen = MainMenuScreen::default();
-        let action = screen
-            .on_key(&state, key('t'))
-            .unwrap();
+        let action = screen.on_key(&state, key('t')).unwrap();
 
         assert!(matches!(action, Some(Action::SetStatus(_))));
     }
@@ -545,11 +555,8 @@ mod tests {
         let state = make_state(td.path(), vec![]);
 
         let mut screen = MainMenuScreen::default();
-        let action = screen
-            .on_key(&state, key('3'))
-            .unwrap();
+        let action = screen.on_key(&state, key('3')).unwrap();
 
         assert!(matches!(action, Some(Action::SetStatus(_))));
     }
 }
-

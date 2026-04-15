@@ -1,8 +1,8 @@
+use crate::command_bus::{BusMessage, CommandBus, CommandSource};
 use crate::error::{AppError, AppResult};
 use crate::hotkeys::HotkeysService;
 use crate::tui::action::Action;
 use crate::tui::app::TuiApp;
-use crate::command_bus::{BusMessage, CommandBus, CommandSource};
 use crossterm::{
     cursor,
     event::{self, Event, KeyEventKind},
@@ -144,4 +144,3 @@ fn handle_bus_message(app: &mut TuiApp, msg: BusMessage) -> AppResult<bool> {
         BusMessage::Command(cmd) => handle_action(app, cmd.action),
     }
 }
-

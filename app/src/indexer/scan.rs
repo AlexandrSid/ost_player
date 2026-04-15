@@ -1,6 +1,6 @@
 use crate::indexer::model::{
-    FolderScanEntry, IndexIssue, IndexIssueKind, IndexReport, LibraryIndex, ScanOptions, TrackEntry,
-    TrackId,
+    FolderScanEntry, IndexIssue, IndexIssueKind, IndexReport, LibraryIndex, ScanOptions,
+    TrackEntry, TrackId,
 };
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -20,8 +20,10 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
 
 pub fn scan_library_folders(folders: &[FolderScanEntry], options: &ScanOptions) -> LibraryIndex {
     let options = options.normalized();
-    let mut report = IndexReport::default();
-    report.roots_total = folders.len();
+    let mut report = IndexReport {
+        roots_total: folders.len(),
+        ..Default::default()
+    };
 
     let mut tracks: Vec<TrackEntry> = Vec::new();
 
@@ -111,6 +113,7 @@ pub fn scan_library_folders(folders: &[FolderScanEntry], options: &ScanOptions) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_dir(
     root: &Path,
     dir: &Path,
@@ -122,10 +125,7 @@ fn scan_dir(
     seen_rel_size: &mut HashSet<(OsString, OsString, u64)>,
     report: &mut IndexReport,
 ) -> Result<(), std::io::Error> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(v) => v,
-        Err(e) => return Err(e),
-    };
+    let entries = std::fs::read_dir(dir)?;
 
     for entry_res in entries {
         let entry = match entry_res {
@@ -242,8 +242,8 @@ fn scan_dir(
             }
         }
 
-        let rel_path = best_effort_rel_path(root, &best_path)
-            .map(|p| p.to_string_lossy().to_string());
+        let rel_path =
+            best_effort_rel_path(root, &best_path).map(|p| p.to_string_lossy().to_string());
 
         out_tracks.push(TrackEntry {
             id: track_id_for_path(&best_path),
@@ -288,7 +288,7 @@ fn canonical_dedup_key(path: &Path) -> OsString {
             }
             return OsString::from(norm.to_ascii_lowercase());
         }
-        return path.as_os_str().to_os_string();
+        path.as_os_str().to_os_string()
     }
     #[cfg(not(windows))]
     {
@@ -303,7 +303,7 @@ fn fallback_rel_key(root: &Path, path: &Path) -> Option<OsString> {
         if let Some(s) = rel.as_os_str().to_str() {
             return Some(OsString::from(s.to_ascii_lowercase()));
         }
-        return Some(rel.as_os_str().to_os_string());
+        Some(rel.as_os_str().to_os_string())
     }
     #[cfg(not(windows))]
     {
@@ -320,12 +320,12 @@ fn os_str_sort_key(s: &OsStr) -> Vec<u8> {
         for w in s.encode_wide() {
             out.extend_from_slice(&w.to_le_bytes());
         }
-        return out;
+        out
     }
     #[cfg(not(windows))]
     {
         use std::os::unix::ffi::OsStrExt;
-        return s.as_bytes().to_vec();
+        s.as_bytes().to_vec()
     }
 }
 
@@ -394,10 +394,7 @@ mod tests {
     fn canonical_dedup_key_normalizes_verbatim_unc_prefix() {
         let p = std::path::PathBuf::from(r"\\?\UNC\Server\Share\Music\Track.ogg");
         let key = canonical_dedup_key(&p);
-        assert_eq!(
-            key.to_str().unwrap(),
-            r"\\server\share\music\track.ogg"
-        );
+        assert_eq!(key.to_str().unwrap(), r"\\server\share\music\track.ogg");
     }
 
     #[test]
@@ -474,4 +471,3 @@ mod tests {
         assert_eq!(index.tracks.len(), 2);
     }
 }
-

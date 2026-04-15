@@ -164,12 +164,12 @@ fn scan_dedups_when_same_root_scanned_twice_by_canonical_path() {
     let idx = scan_library(&roots, &options);
 
     assert_eq!(idx.tracks.len(), 2, "unique tracks should remain");
-    assert_eq!(
-        idx.report.deduped, 2,
-        "second pass should dedup both files"
-    );
+    assert_eq!(idx.report.deduped, 2, "second pass should dedup both files");
     assert_eq!(idx.report.roots_total, 2);
-    assert_eq!(idx.report.roots_ok, 2, "both roots were scanned successfully");
+    assert_eq!(
+        idx.report.roots_ok, 2,
+        "both roots were scanned successfully"
+    );
 }
 
 #[test]
@@ -200,7 +200,11 @@ fn scan_is_deterministically_sorted_by_rel_path_lowercased() {
         .collect::<Vec<_>>();
     assert_eq!(
         ordered,
-        vec!["A.mp3".to_string(), "b.mp3".to_string(), "c.ogg".to_string()]
+        vec![
+            "A.mp3".to_string(),
+            "b.mp3".to_string(),
+            "c.ogg".to_string()
+        ]
     );
 }
 
@@ -306,12 +310,18 @@ fn scan_records_structured_issue_when_root_is_not_a_directory_read_dir_failed() 
         idx.report
             .issues
             .iter()
-            .any(|i| i.kind == IndexIssueKind::ReadDirFailed || i.kind == IndexIssueKind::MissingFolder),
+            .any(|i| i.kind == IndexIssueKind::ReadDirFailed
+                || i.kind == IndexIssueKind::MissingFolder),
         "should include a structured issue for root read_dir failure"
     );
     assert!(
-        idx.report.issue_counts.get(&IndexIssueKind::ReadDirFailed).is_some()
-            || idx.report.issue_counts.get(&IndexIssueKind::MissingFolder).is_some()
+        idx.report
+            .issue_counts
+            .contains_key(&IndexIssueKind::ReadDirFailed)
+            || idx
+                .report
+                .issue_counts
+                .contains_key(&IndexIssueKind::MissingFolder)
     );
 }
 
@@ -352,4 +362,3 @@ fn index_cache_load_best_effort_returns_none_when_missing() {
     let loaded = index_io::load_best_effort(&paths);
     assert!(loaded.is_none());
 }
-

@@ -51,12 +51,18 @@ fn app_paths_resolve_portable_layout_under_data_dir() {
         paths.playlists_dir,
         expected_base.join("data").join("playlists")
     );
-    assert_eq!(paths.config_path, expected_base.join("data").join("config.yaml"));
+    assert_eq!(
+        paths.config_path,
+        expected_base.join("data").join("config.yaml")
+    );
     assert_eq!(
         paths.playlists_path,
         expected_base.join("data").join("playlists.yaml")
     );
-    assert_eq!(paths.state_path, expected_base.join("data").join("state.yaml"));
+    assert_eq!(
+        paths.state_path,
+        expected_base.join("data").join("state.yaml")
+    );
 }
 
 #[test]
@@ -80,8 +86,7 @@ fn app_paths_ensure_writable_returns_io_error_if_data_dir_is_a_file() {
     match err {
         AppError::Io { path, .. } => {
             assert_eq!(
-                path,
-                paths.cache_dir,
+                path, paths.cache_dir,
                 "first create_dir_all should fail on cache_dir"
             );
         }
@@ -99,7 +104,10 @@ fn config_load_or_create_creates_file_with_defaults() {
     assert_eq!(cfg.settings.min_size_bytes, 1_000_000);
     assert!(!cfg.settings.shuffle);
     assert!(matches!(cfg.settings.repeat, RepeatMode::Off));
-    assert_eq!(cfg.settings.supported_extensions, vec!["mp3".to_string(), "ogg".to_string()]);
+    assert_eq!(
+        cfg.settings.supported_extensions,
+        vec!["mp3".to_string(), "ogg".to_string()]
+    );
 }
 
 #[test]
@@ -143,17 +151,25 @@ fn config_save_is_atomicish_no_tmp_or_bak_left_and_no_data_loss() {
     let paths = make_paths_in(dir.path().to_path_buf());
     fs::create_dir_all(&paths.data_dir).unwrap();
 
-    let mut cfg = AppConfig::default();
-    cfg.folders = vec![
-        FolderEntry::new("C:\\Music".to_string()),
-        FolderEntry::new("C:\\Music".to_string()),
-    ];
-    cfg.settings.shuffle = true;
-    cfg.settings.repeat = RepeatMode::All;
+    let cfg = AppConfig {
+        folders: vec![
+            FolderEntry::new("C:\\Music".to_string()),
+            FolderEntry::new("C:\\Music".to_string()),
+        ],
+        settings: ost_player::config::SettingsConfig {
+            shuffle: true,
+            repeat: RepeatMode::All,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
 
     // Seed an existing file to exercise backup/replace code path.
-    fs::write(&paths.config_path, "schema_version: 1\nsettings: { supported_extensions: [mp3, ogg] }\n")
-        .unwrap();
+    fs::write(
+        &paths.config_path,
+        "schema_version: 1\nsettings: { supported_extensions: [mp3, ogg] }\n",
+    )
+    .unwrap();
 
     config_io::save(&paths, &cfg).expect("save should succeed");
 
@@ -161,31 +177,25 @@ fn config_save_is_atomicish_no_tmp_or_bak_left_and_no_data_loss() {
     let loaded = config_io::load_or_create(&paths).expect("should load saved config");
     assert!(loaded.settings.shuffle);
     assert!(matches!(loaded.settings.repeat, RepeatMode::All));
-    assert_eq!(loaded.folders, vec![FolderEntry::new("C:\\Music".to_string())]);
+    assert_eq!(
+        loaded.folders,
+        vec![FolderEntry::new("C:\\Music".to_string())]
+    );
 
     // Implementation writes via `{file}.tmp` and uses `{file}.bak` during replacement.
-    let tmp = paths
-        .config_path
-        .with_file_name(format!(
-            "{}.tmp",
-            paths
-                .config_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-        ));
-    let bak = paths
-        .config_path
-        .with_file_name(format!(
-            "{}.bak",
-            paths
-                .config_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-        ));
+    let tmp = paths.config_path.with_file_name(format!(
+        "{}.tmp",
+        paths.config_path.file_name().unwrap().to_string_lossy()
+    ));
+    let bak = paths.config_path.with_file_name(format!(
+        "{}.bak",
+        paths.config_path.file_name().unwrap().to_string_lossy()
+    ));
     assert!(!tmp.exists(), "tmp file should not remain");
-    assert!(!bak.exists(), "bak file should not remain (removed best-effort)");
+    assert!(
+        !bak.exists(),
+        "bak file should not remain (removed best-effort)"
+    );
 }
 
 #[test]
@@ -194,7 +204,10 @@ fn playlists_load_or_create_creates_file_with_defaults() {
     let paths = make_paths_in(dir.path().to_path_buf());
 
     let pls = playlists_io::load_or_create(&paths).expect("should create default playlists");
-    assert!(paths.playlists_path.is_file(), "playlists file should be created");
+    assert!(
+        paths.playlists_path.is_file(),
+        "playlists file should be created"
+    );
     assert_eq!(pls.schema_version, 1);
     assert!(pls.active.is_none());
     assert!(pls.playlists.is_empty());
@@ -234,9 +247,7 @@ playlists:
         .expect("playlists should be a sequence");
     let first = playlists.first().expect("one playlist expected");
     assert_eq!(
-        first
-            .get("unknown_playlist_field")
-            .and_then(Value::as_i64),
+        first.get("unknown_playlist_field").and_then(Value::as_i64),
         Some(42)
     );
 }
@@ -247,14 +258,16 @@ fn playlists_save_is_atomicish_no_tmp_or_bak_left_and_no_data_loss() {
     let paths = make_paths_in(dir.path().to_path_buf());
     fs::create_dir_all(&paths.data_dir).unwrap();
 
-    let mut pls = PlaylistsFile::default();
-    pls.active = Some("p1".to_string());
-    pls.playlists.push(ost_player::playlists::Playlist {
-        id: "p1".to_string(),
-        name: "My".to_string(),
-        folders: vec![FolderEntry::new("C:\\Music".to_string())],
-        extra: Default::default(),
-    });
+    let pls = PlaylistsFile {
+        active: Some("p1".to_string()),
+        playlists: vec![ost_player::playlists::Playlist {
+            id: "p1".to_string(),
+            name: "My".to_string(),
+            folders: vec![FolderEntry::new("C:\\Music".to_string())],
+            extra: Default::default(),
+        }],
+        ..Default::default()
+    };
 
     fs::write(&paths.playlists_path, "schema_version: 1\nplaylists: []\n").unwrap();
     playlists_io::save(&paths, &pls).expect("save should succeed");
@@ -264,27 +277,17 @@ fn playlists_save_is_atomicish_no_tmp_or_bak_left_and_no_data_loss() {
     assert_eq!(loaded.playlists.len(), 1);
     assert_eq!(loaded.playlists[0].name, "My");
 
-    let tmp = paths
-        .playlists_path
-        .with_file_name(format!(
-            "{}.tmp",
-            paths
-                .playlists_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-        ));
-    let bak = paths
-        .playlists_path
-        .with_file_name(format!(
-            "{}.bak",
-            paths
-                .playlists_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-        ));
+    let tmp = paths.playlists_path.with_file_name(format!(
+        "{}.tmp",
+        paths.playlists_path.file_name().unwrap().to_string_lossy()
+    ));
+    let bak = paths.playlists_path.with_file_name(format!(
+        "{}.bak",
+        paths.playlists_path.file_name().unwrap().to_string_lossy()
+    ));
     assert!(!tmp.exists(), "tmp file should not remain");
-    assert!(!bak.exists(), "bak file should not remain (removed best-effort)");
+    assert!(
+        !bak.exists(),
+        "bak file should not remain (removed best-effort)"
+    );
 }
-

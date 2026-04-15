@@ -154,7 +154,9 @@ mod tests {
         recover_missing_final(&final_path).unwrap();
         assert_eq!(std::fs::read_to_string(&final_path).unwrap(), "from_bak\n");
         assert!(!bak.exists());
-        assert!(tmp.exists(), "tmp should remain untouched when bak was restored");
+        assert!(
+            tmp.exists(),
+            "tmp should remain untouched when bak was restored"
+        );
     }
 }
-

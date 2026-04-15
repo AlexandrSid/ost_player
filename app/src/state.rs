@@ -68,4 +68,3 @@ pub fn save(paths: &AppPaths, state: &StateFile) -> AppResult<()> {
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
-

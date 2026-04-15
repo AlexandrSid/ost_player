@@ -56,7 +56,12 @@ hotkeys:
 #[test]
 fn chord_matching_requires_all_required_modifiers_but_allows_extra_modifiers() {
     let cfg = AppConfig::default();
-    let chord = cfg.hotkeys.bindings.play_pause.clone().expect("default play_pause chord");
+    let chord = cfg
+        .hotkeys
+        .bindings
+        .play_pause
+        .clone()
+        .expect("default play_pause chord");
 
     let down = hs_mods(&[HotkeyModifier::Ctrl, HotkeyModifier::RightShift]);
     assert!(HotkeysEngine::chord_matches(&chord, HotkeyKey::Up, &down));
@@ -66,10 +71,18 @@ fn chord_matching_requires_all_required_modifiers_but_allows_extra_modifiers() {
         HotkeyModifier::RightShift,
         HotkeyModifier::Alt,
     ]);
-    assert!(HotkeysEngine::chord_matches(&chord, HotkeyKey::Up, &down_extra));
+    assert!(HotkeysEngine::chord_matches(
+        &chord,
+        HotkeyKey::Up,
+        &down_extra
+    ));
 
     let down_missing = hs_mods(&[HotkeyModifier::Ctrl]);
-    assert!(!HotkeysEngine::chord_matches(&chord, HotkeyKey::Up, &down_missing));
+    assert!(!HotkeysEngine::chord_matches(
+        &chord,
+        HotkeyKey::Up,
+        &down_missing
+    ));
 }
 
 #[test]
@@ -87,7 +100,10 @@ fn tap_emits_tap_action_when_released_before_hold_threshold() {
         direction: KeyDirection::Down,
         modifiers_down: mods.clone(),
     });
-    assert!(actions.is_empty(), "no actions on keydown for tap/hold binding");
+    assert!(
+        actions.is_empty(),
+        "no actions on keydown for tap/hold binding"
+    );
 
     let actions = engine.handle_event(KeyEvent {
         now_ms: 100, // < default 300ms threshold
@@ -129,7 +145,10 @@ fn hold_emits_seek_steps_and_never_taps_after_hold_fires() {
     let actions = engine.tick(800, &mods_map);
     assert_eq!(
         actions,
-        vec![Action::PlayerSeekRelativeSeconds(5), Action::PlayerSeekRelativeSeconds(5)]
+        vec![
+            Action::PlayerSeekRelativeSeconds(5),
+            Action::PlayerSeekRelativeSeconds(5)
+        ]
     );
 
     // Release after hold has fired: should not tap next.
@@ -171,7 +190,10 @@ fn tap_is_not_emitted_if_released_after_hold_threshold_even_if_tick_never_ran() 
         direction: KeyDirection::Up,
         modifiers_down: mods,
     });
-    assert!(actions.is_empty(), "tap must not be emitted when held >= threshold");
+    assert!(
+        actions.is_empty(),
+        "tap must not be emitted when held >= threshold"
+    );
 }
 
 #[test]
@@ -194,4 +216,3 @@ fn app_config_validate_rejects_bad_hotkey_timings() {
     cfg.hotkeys.timings.hold_threshold_ms = 10; // too small per sane range
     assert!(cfg.validate().unwrap_err().contains("within 50..=5000"));
 }
-

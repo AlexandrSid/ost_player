@@ -31,4 +31,3 @@ pub fn init(paths: &AppPaths) -> AppResult<LoggingGuards> {
         _file_guard: file_guard,
     })
 }
-

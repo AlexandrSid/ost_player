@@ -1,6 +1,6 @@
+use crate::command_bus::{BusMessage, CommandEnvelope, CommandSource};
 use crate::config::HotkeysConfig;
 use crate::hotkeys::logic::{HotkeysEngine, KeyDirection, KeyEvent};
-use crate::command_bus::{BusMessage, CommandEnvelope, CommandSource};
 use crate::tui::action::Action;
 use std::sync::mpsc;
 
@@ -8,6 +8,7 @@ pub mod logic;
 
 pub struct HotkeysService {
     #[cfg(windows)]
+    #[expect(dead_code)]
     inner: windows::WindowsHotkeysService,
 }
 
@@ -15,11 +16,14 @@ impl HotkeysService {
     /// Start global hotkeys. On non-Windows platforms this returns `Ok(None)`.
     ///
     /// Errors are returned as user-friendly strings (caller can surface them in the UI).
-    pub fn start(cfg: &HotkeysConfig, tx: mpsc::Sender<BusMessage>) -> Result<Option<Self>, String> {
+    pub fn start(
+        cfg: &HotkeysConfig,
+        tx: mpsc::Sender<BusMessage>,
+    ) -> Result<Option<Self>, String> {
         #[cfg(windows)]
         {
             let inner = windows::WindowsHotkeysService::start(cfg, tx)?;
-            return Ok(Some(Self { inner }));
+            Ok(Some(Self { inner }))
         }
         #[cfg(not(windows))]
         {
@@ -34,20 +38,22 @@ impl HotkeysService {
 mod windows {
     use super::*;
     use crate::config::{HotkeyChord, HotkeyKey, HotkeyModifier, TapHoldBinding};
+    use ::windows::Win32::Foundation::{GetLastError, LPARAM, WPARAM};
+    use ::windows::Win32::System::Threading::GetCurrentThreadId;
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT,
+        MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_DOWN, VK_LEFT, VK_RIGHT, VK_S, VK_SPACE,
+        VK_UP,
+    };
+    use ::windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_HOTKEY,
+        WM_QUIT,
+    };
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
-    use ::windows::Win32::Foundation::{GetLastError, LPARAM, WPARAM};
-    use ::windows::Win32::System::Threading::GetCurrentThreadId;
-    use ::windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL,
-        MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_DOWN, VK_LEFT, VK_RIGHT, VK_SPACE, VK_S, VK_UP,
-    };
-    use ::windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_HOTKEY, WM_QUIT,
-    };
 
     pub struct WindowsHotkeysService {
         thread_id: u32,
@@ -195,13 +201,15 @@ mod windows {
     }
 
     fn chord_mod_flags(chord: &HotkeyChord) -> u32 {
-        let mut flags = MOD_NOREPEAT.0 as u32;
+        let mut flags = MOD_NOREPEAT.0;
         for m in &chord.modifiers {
             flags |= match m {
-                HotkeyModifier::Ctrl => MOD_CONTROL.0 as u32,
-                HotkeyModifier::Alt => MOD_ALT.0 as u32,
-                HotkeyModifier::Shift | HotkeyModifier::LeftShift | HotkeyModifier::RightShift => MOD_SHIFT.0 as u32,
-                HotkeyModifier::Win => MOD_WIN.0 as u32,
+                HotkeyModifier::Ctrl => MOD_CONTROL.0,
+                HotkeyModifier::Alt => MOD_ALT.0,
+                HotkeyModifier::Shift | HotkeyModifier::LeftShift | HotkeyModifier::RightShift => {
+                    MOD_SHIFT.0
+                }
+                HotkeyModifier::Win => MOD_WIN.0,
             };
         }
         flags
@@ -209,7 +217,7 @@ mod windows {
 
     fn vk_is_down(vk: i32) -> bool {
         // High-order bit set means key currently down.
-        (unsafe { GetAsyncKeyState(vk) } as i16) < 0
+        ((unsafe { GetAsyncKeyState(vk) } as u16) & 0x8000) != 0
     }
 
     fn snapshot_modifiers() -> HashSet<HotkeyModifier> {
@@ -262,21 +270,16 @@ mod windows {
         for reg in registration_plan.into_iter() {
             let vk = key_to_vk(reg.chord.key);
             let mods = chord_mod_flags(&reg.chord);
-            let ok = unsafe {
-                RegisterHotKey(
-                    None,
-                    reg.id,
-                    HOT_KEY_MODIFIERS(mods),
-                    vk,
-                )
-            }
-            .is_ok();
+            let ok = unsafe { RegisterHotKey(None, reg.id, HOT_KEY_MODIFIERS(mods), vk) }.is_ok();
             if ok {
                 registered_ids.push(reg.id);
                 registrations.insert(reg.id, reg);
             } else {
                 let e = unsafe { GetLastError() };
-                errors.push(format!("hotkey '{}' could not be registered (vk={vk}, mods={mods:#x}): {e:?}", reg.label));
+                errors.push(format!(
+                    "hotkey '{}' could not be registered (vk={vk}, mods={mods:#x}): {e:?}",
+                    reg.label
+                ));
             }
         }
 
@@ -413,4 +416,3 @@ mod windows {
         }
     }
 }
-

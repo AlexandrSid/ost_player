@@ -159,8 +159,11 @@ impl PlaylistsScreen {
                     return Some(Action::SetStatus("no playlists to load".to_string()));
                 }
                 let title = match state.player.status {
-                    crate::player::PlaybackStatus::Stopped => "Load selected playlist (swap folders)?",
-                    crate::player::PlaybackStatus::Playing | crate::player::PlaybackStatus::Paused => {
+                    crate::player::PlaybackStatus::Stopped => {
+                        "Load selected playlist (swap folders)?"
+                    }
+                    crate::player::PlaybackStatus::Playing
+                    | crate::player::PlaybackStatus::Paused => {
                         "Stop playback and load selected playlist (swap folders)?"
                     }
                 };
@@ -195,4 +198,3 @@ pub struct PlaylistsView<'a> {
     pub selected: usize,
     pub active_id: Option<&'a str>,
 }
-

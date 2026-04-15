@@ -30,6 +30,8 @@ cargo build --release
 
 The portable executable will be at `app/target/release/ost_player.exe` (Windows) or `ost_player` (Linux).
 
+> **Linux note (icons)**: when/if you ship a Linux desktop package, the app icon is handled by **packaging** (e.g. `.desktop` + `hicolor` PNGs). A plain `cargo build --release` does not embed a desktop icon into the Linux binary.
+
 ### Run
 
 Move or copy the executable to your preferred location, then run it:
