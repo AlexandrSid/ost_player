@@ -15,23 +15,109 @@ pub enum RepeatMode {
     One,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SettingsConfig {
-    #[serde(default = "defaults::default_min_size_bytes")]
+    /// Minimum size threshold, in kilobytes (1 kb = 1024 bytes).
+    ///
+    /// Persisted as `settings.min_size_kb`.
+    pub min_size_kb: u64,
+
+    /// Derived value for existing call sites; not persisted.
     pub min_size_bytes: u64,
 
-    #[serde(default)]
     pub shuffle: bool,
 
-    #[serde(default)]
     pub repeat: RepeatMode,
 
-    #[serde(default = "defaults::default_supported_extensions")]
     pub supported_extensions: Vec<String>,
 
     /// Preserve unknown `settings.*` fields for forward compatibility.
-    #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SettingsConfigDe {
+    #[serde(default)]
+    min_size_kb: Option<u64>,
+
+    /// Legacy field, supported for read-compat only.
+    #[serde(default)]
+    min_size_bytes: Option<u64>,
+
+    #[serde(default)]
+    shuffle: bool,
+
+    #[serde(default)]
+    repeat: RepeatMode,
+
+    #[serde(default = "defaults::default_supported_extensions")]
+    supported_extensions: Vec<String>,
+
+    /// Preserve unknown `settings.*` fields for forward compatibility.
+    #[serde(flatten, default)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SettingsConfigSer<'a> {
+    min_size_kb: u64,
+    shuffle: bool,
+    repeat: RepeatMode,
+    supported_extensions: &'a Vec<String>,
+
+    /// Preserve unknown `settings.*` fields for forward compatibility.
+    #[serde(flatten)]
+    extra: &'a BTreeMap<String, Value>,
+}
+
+impl<'de> Deserialize<'de> for SettingsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let v = Option::<SettingsConfigDe>::deserialize(deserializer)?;
+        let v = match v {
+            None => return Ok(Self::default()),
+            Some(v) => v,
+        };
+
+        // Precedence: `min_size_kb` wins when both are present.
+        // Legacy conversion rounds down (bytes -> kb) to keep behavior simple/stable.
+        let min_size_kb = v
+            .min_size_kb
+            .or_else(|| v.min_size_bytes.map(|b| b / 1024))
+            .unwrap_or_else(defaults::default_min_size_kb);
+
+        let min_size_bytes = min_size_kb
+            .checked_mul(1024)
+            .ok_or_else(|| <D::Error as de::Error>::custom("settings.min_size_kb is too large"))?;
+
+        Ok(Self {
+            min_size_kb,
+            min_size_bytes,
+            shuffle: v.shuffle,
+            repeat: v.repeat,
+            supported_extensions: v.supported_extensions,
+            extra: v.extra,
+        })
+    }
+}
+
+impl Serialize for SettingsConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Migration-on-save: write `min_size_kb` only (legacy `min_size_bytes` omitted).
+        SettingsConfigSer {
+            min_size_kb: self.min_size_kb,
+            shuffle: self.shuffle,
+            repeat: self.repeat,
+            supported_extensions: &self.supported_extensions,
+            extra: &self.extra,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl Default for SettingsConfig {
@@ -227,6 +313,10 @@ impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.settings.supported_extensions.is_empty() {
             return Err("settings.supported_extensions must not be empty".to_string());
+        }
+
+        if self.settings.min_size_kb.checked_mul(1024).is_none() {
+            return Err("settings.min_size_kb is too large".to_string());
         }
 
         // Hotkeys timings: non-zero and within sane bounds to avoid hangs/spins.
@@ -449,5 +539,20 @@ settings:
         };
         let y = serde_yaml::to_string(&entry).unwrap();
         assert!(!y.contains("root_only: true"));
+    }
+
+    #[test]
+    fn settings_min_size_kb_wins_over_legacy_min_size_bytes_when_both_present() {
+        let raw = r#"
+schema_version: 1
+settings:
+  min_size_kb: 2
+  min_size_bytes: 999999999
+  supported_extensions: [mp3]
+"#;
+
+        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(cfg.settings.min_size_kb, 2);
+        assert_eq!(cfg.settings.min_size_bytes, 2 * 1024);
     }
 }

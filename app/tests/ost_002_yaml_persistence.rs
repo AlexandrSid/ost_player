@@ -101,12 +101,28 @@ fn config_load_or_create_creates_file_with_defaults() {
 
     let cfg = config_io::load_or_create(&paths).expect("should create default config");
     assert!(paths.config_path.is_file(), "config file should be created");
-    assert_eq!(cfg.settings.min_size_bytes, 1_000_000);
+    assert_eq!(cfg.settings.min_size_kb, 1024);
+    assert_eq!(cfg.settings.min_size_bytes, 1024 * 1024);
     assert!(!cfg.settings.shuffle);
     assert!(matches!(cfg.settings.repeat, RepeatMode::Off));
     assert_eq!(
         cfg.settings.supported_extensions,
         vec!["mp3".to_string(), "ogg".to_string()]
+    );
+
+    // Default serialization should explicitly include the new persisted field.
+    let v = read_yaml_value(&paths.config_path);
+    assert_eq!(
+        v.get("settings")
+            .and_then(|s| s.get("min_size_kb"))
+            .and_then(Value::as_i64),
+        Some(1024)
+    );
+    assert!(
+        v.get("settings")
+            .and_then(|s| s.get("min_size_bytes"))
+            .is_none(),
+        "config.yaml should not emit legacy settings.min_size_bytes"
     );
 }
 
@@ -142,6 +158,20 @@ unknown_top_level:
             .and_then(|x| x.get("nested"))
             .and_then(Value::as_i64),
         Some(123)
+    );
+
+    // Migration-on-save: write the new field only.
+    assert_eq!(
+        v.get("settings")
+            .and_then(|s| s.get("min_size_kb"))
+            .and_then(Value::as_i64),
+        Some(976) // 1_000_000 / 1024 rounds down
+    );
+    assert!(
+        v.get("settings")
+            .and_then(|s| s.get("min_size_bytes"))
+            .is_none(),
+        "config.yaml should not emit legacy settings.min_size_bytes"
     );
 }
 
@@ -195,6 +225,34 @@ fn config_save_is_atomicish_no_tmp_or_bak_left_and_no_data_loss() {
     assert!(
         !bak.exists(),
         "bak file should not remain (removed best-effort)"
+    );
+}
+
+#[test]
+fn config_save_after_min_size_kb_action_serializes_min_size_kb_only() {
+    let dir = tempdir().unwrap();
+    let paths = make_paths_in(dir.path().to_path_buf());
+    fs::create_dir_all(&paths.data_dir).unwrap();
+
+    // Simulate the settings edit flow applying Action::SetMinSizeKb(v).
+    let mut cfg = AppConfig::default();
+    cfg.settings.min_size_kb = 7;
+    cfg.settings.min_size_bytes = 7 * 1024;
+
+    config_io::save(&paths, &cfg).expect("save should succeed");
+
+    let v = read_yaml_value(&paths.config_path);
+    assert_eq!(
+        v.get("settings")
+            .and_then(|s| s.get("min_size_kb"))
+            .and_then(Value::as_i64),
+        Some(7)
+    );
+    assert!(
+        v.get("settings")
+            .and_then(|s| s.get("min_size_bytes"))
+            .is_none(),
+        "config.yaml should not emit legacy settings.min_size_bytes"
     );
 }
 

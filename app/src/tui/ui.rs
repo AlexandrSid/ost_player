@@ -119,8 +119,8 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let v = app.settings.view();
 
     let text = format!(
-        "Settings:\n\n  min_size_bytes: {}\n  shuffle: {}\n  repeat: {}\n\nKeys:\n  m  edit min_size_bytes\n  s  toggle shuffle\n  r  cycle repeat\n  Esc/q  back",
-        state.cfg.settings.min_size_bytes,
+        "Settings:\n\n  min_size_kb: {}kb\n  shuffle: {}\n  repeat: {}\n\nKeys:\n  m  edit min_size_kb\n  s  toggle shuffle\n  r  cycle repeat\n  Esc/q  back",
+        state.cfg.settings.min_size_kb,
         if state.cfg.settings.shuffle { "on" } else { "off" },
         state.repeat_label(),
     );
@@ -212,16 +212,17 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
     });
 
     let text = format!(
-        "{}    |    tracks={}  min_size={}  shuffle={}  repeat={}",
+        "{}    |    tracks={}  min_size={}kb  shuffle={}  repeat={}  Volume={}%",
         status,
         state.library.tracks.len(),
-        state.cfg.settings.min_size_bytes,
+        state.cfg.settings.min_size_kb,
         if state.cfg.settings.shuffle {
             "on"
         } else {
             "off"
         },
-        state.repeat_label()
+        state.repeat_label(),
+        state.player.volume_percent
     );
 
     frame.render_widget(
@@ -688,5 +689,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn status_bar_renders_default_min_size_kb_and_volume_percent() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let cfg = AppConfig::default();
+        let app = TuiApp::new(paths, cfg, PlaylistsFile::default());
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buffer_as_text(terminal.backend().buffer());
+        assert!(
+            text.contains("min_size=1024kb"),
+            "expected status bar to contain default min_size=1024kb; buffer was:\n{text}"
+        );
+        assert!(
+            text.contains("Volume=75%"),
+            "expected status bar to contain default Volume=75%; buffer was:\n{text}"
+        );
+    }
+
+    #[test]
+    fn status_bar_updates_when_volume_percent_changes_in_state() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let cfg = AppConfig::default();
+        let mut app = TuiApp::new(paths, cfg, PlaylistsFile::default());
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = buffer_as_text(terminal.backend().buffer());
+        assert!(
+            text.contains("Volume=75%"),
+            "expected status bar to contain default Volume=75% before any player snapshot; buffer was:\n{text}"
+        );
+
+        app.state.player.volume_percent = 12;
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text2 = buffer_as_text(terminal.backend().buffer());
+        assert!(
+            text2.contains("Volume=12%"),
+            "expected status bar to update to Volume=12% after state change; buffer was:\n{text2}"
+        );
+        assert!(
+            !text2.contains("Volume=75%"),
+            "regression: updated status bar must not keep old Volume=75%; buffer was:\n{text2}"
+        );
     }
 }

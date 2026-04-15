@@ -29,6 +29,15 @@ impl AppState {
         playlists: PlaylistsFile,
         library: LibraryIndex,
     ) -> Self {
+        // Keep the initial UI snapshot consistent with config defaults.
+        // The player thread will soon emit a real snapshot, but tests and early draws
+        // should still render sensible values (e.g. default volume).
+        let player = PlayerSnapshot {
+            shuffle: cfg.settings.shuffle,
+            repeat: cfg.settings.repeat,
+            volume_percent: cfg.audio.default_volume_percent,
+            ..Default::default()
+        };
         Self {
             paths,
             cfg,
@@ -37,7 +46,7 @@ impl AppState {
             screen: Screen::MainMenu,
             status: None,
             last_error: None,
-            player: PlayerSnapshot::default(),
+            player,
             main_selected_folder: 0,
             playlists_selected: 0,
         }

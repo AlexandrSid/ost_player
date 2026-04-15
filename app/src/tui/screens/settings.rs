@@ -29,11 +29,11 @@ impl SettingsScreen {
                     Ok(n) => n,
                     Err(_) => {
                         return Ok(Some(Action::SetStatus(
-                            "min_size_bytes must be an integer".to_string(),
+                            "min_size_kb must be an integer".to_string(),
                         )))
                     }
                 };
-                return Ok(Some(Action::SetMinSizeBytes(parsed)));
+                return Ok(Some(Action::SetMinSizeKb(parsed)));
             }
             return Ok(None);
         }
@@ -54,11 +54,11 @@ impl SettingsScreen {
             KeyCode::Esc | KeyCode::Char('q') => Some(Action::Navigate(Screen::MainMenu)),
             KeyCode::Char('m') => {
                 self.min_size_input = Some(TextInput::new(
-                    "Set min_size_bytes",
-                    &state.cfg.settings.min_size_bytes.to_string(),
+                    "Set min_size_kb",
+                    &state.cfg.settings.min_size_kb.to_string(),
                     "Type number  Enter=save  Esc=cancel",
                 ));
-                Some(Action::SetStatus("editing min_size_bytes...".to_string()))
+                Some(Action::SetStatus("editing min_size_kb...".to_string()))
             }
             KeyCode::Char('s') => Some(Action::ToggleShuffle),
             KeyCode::Char('r') => Some(Action::CycleRepeat),
@@ -75,4 +75,97 @@ impl SettingsScreen {
 
 pub struct SettingsView<'a> {
     pub min_size_input: Option<&'a TextInput>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::indexer::LibraryIndex;
+    use crate::paths::AppPaths;
+    use crate::playlists::PlaylistsFile;
+    use crate::tui::state::AppState;
+    use crossterm::event::KeyModifiers;
+
+    fn paths_for(dir: &std::path::Path) -> AppPaths {
+        let base_dir = dir.to_path_buf();
+        let data_dir = base_dir.join("data");
+        AppPaths {
+            base_dir,
+            data_dir: data_dir.clone(),
+            cache_dir: data_dir.join("cache"),
+            logs_dir: data_dir.join("logs"),
+            playlists_dir: data_dir.join("playlists"),
+            config_path: data_dir.join("config.yaml"),
+            playlists_path: data_dir.join("playlists.yaml"),
+            state_path: data_dir.join("state.yaml"),
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn state_with_min_size_kb(td: &tempfile::TempDir, min_size_kb: u64) -> AppState {
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = min_size_kb;
+        cfg.settings.min_size_bytes = min_size_kb * 1024;
+        AppState::new(
+            paths_for(td.path()),
+            cfg,
+            PlaylistsFile::default(),
+            LibraryIndex::default(),
+        )
+    }
+
+    #[test]
+    fn editing_min_size_kb_submits_set_min_size_kb_action_not_bytes() {
+        let td = tempfile::tempdir().unwrap();
+        let state = state_with_min_size_kb(&td, 0);
+        let mut s = SettingsScreen::default();
+
+        // Enter edit mode.
+        let a = s.on_key(&state, key(KeyCode::Char('m'))).unwrap().unwrap();
+        assert_eq!(a, Action::SetStatus("editing min_size_kb...".to_string()));
+        assert!(s.view().min_size_input.is_some());
+
+        // Clear the initial "0" then type "123" and submit.
+        s.on_key(&state, key(KeyCode::Backspace)).unwrap();
+        s.on_key(&state, key(KeyCode::Char('1'))).unwrap();
+        s.on_key(&state, key(KeyCode::Char('2'))).unwrap();
+        s.on_key(&state, key(KeyCode::Char('3'))).unwrap();
+
+        let a = s.on_key(&state, key(KeyCode::Enter)).unwrap().unwrap();
+        assert_eq!(a, Action::SetMinSizeKb(123));
+        assert!(
+            s.view().min_size_input.is_none(),
+            "input should close on submit"
+        );
+    }
+
+    #[test]
+    fn editing_min_size_kb_invalid_input_returns_status_error_and_closes_modal() {
+        let td = tempfile::tempdir().unwrap();
+        let state = state_with_min_size_kb(&td, 0);
+        let mut s = SettingsScreen::default();
+
+        s.on_key(&state, key(KeyCode::Char('m'))).unwrap();
+        assert!(s.view().min_size_input.is_some());
+
+        // Clear "0", type invalid number, submit.
+        s.on_key(&state, key(KeyCode::Backspace)).unwrap();
+        s.on_key(&state, key(KeyCode::Char('1'))).unwrap();
+        s.on_key(&state, key(KeyCode::Char('2'))).unwrap();
+        s.on_key(&state, key(KeyCode::Char('a'))).unwrap();
+
+        let a = s.on_key(&state, key(KeyCode::Enter)).unwrap().unwrap();
+        assert_eq!(
+            a,
+            Action::SetStatus("min_size_kb must be an integer".to_string())
+        );
+        assert!(
+            s.view().min_size_input.is_none(),
+            "input should close on submit"
+        );
+    }
 }

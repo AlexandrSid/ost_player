@@ -22,7 +22,7 @@ pub enum Action {
     AddFolder(String),
     RemoveFolderAt(usize),
     ToggleFolderRootOnlyAt(usize),
-    SetMinSizeBytes(u64),
+    SetMinSizeKb(u64),
     ToggleShuffle,
     CycleRepeat,
 

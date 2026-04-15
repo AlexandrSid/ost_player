@@ -113,6 +113,7 @@ pub struct PlayerSnapshot {
     pub current_path: Option<PathBuf>,
     pub shuffle: bool,
     pub repeat: RepeatMode,
+    pub volume_percent: u8,
     pub queue_pos: Option<usize>,
     pub queue_len: usize,
     pub track_position: Duration,
@@ -127,6 +128,7 @@ impl Default for PlayerSnapshot {
             current_path: None,
             shuffle: false,
             repeat: RepeatMode::Off,
+            volume_percent: 0,
             queue_pos: None,
             queue_len: 0,
             track_position: Duration::from_secs(0),
@@ -390,6 +392,7 @@ impl Engine {
             current_path: self.current_path.clone(),
             shuffle: self.shuffle,
             repeat: self.repeat,
+            volume_percent: self.volume_percent.min(100),
             queue_pos,
             queue_len,
             track_position,
@@ -1152,5 +1155,45 @@ mod tests {
         assert_eq!(e.volume_percent, 70);
         e.on_command(PlayerCommand::AdjustVolumePercent(5)).unwrap();
         assert_eq!(e.volume_percent, 75);
+    }
+
+    #[test]
+    fn snapshot_includes_volume_percent_and_clamps_initial_over_100() {
+        let e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 250);
+
+        let (tx, rx) = mpsc::channel::<PlayerEvent>();
+        e.emit_snapshot(&tx);
+        let snap = match rx.try_recv().unwrap() {
+            PlayerEvent::Snapshot(s) => s,
+            other => panic!("expected snapshot event, got: {other:?}"),
+        };
+
+        assert_eq!(snap.volume_percent, 100);
+    }
+
+    #[test]
+    fn snapshot_volume_percent_updates_after_set_and_adjust_commands() {
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 50);
+
+        // Set beyond 100 clamps to 100.
+        e.on_command(PlayerCommand::SetVolumePercent(180)).unwrap();
+        let (tx, rx) = mpsc::channel::<PlayerEvent>();
+        e.emit_snapshot(&tx);
+        let snap = match rx.try_recv().unwrap() {
+            PlayerEvent::Snapshot(s) => s,
+            other => panic!("expected snapshot event, got: {other:?}"),
+        };
+        assert_eq!(snap.volume_percent, 100);
+
+        // Adjust down beyond 0 clamps to 0.
+        e.on_command(PlayerCommand::AdjustVolumePercent(-120))
+            .unwrap();
+        let (tx, rx) = mpsc::channel::<PlayerEvent>();
+        e.emit_snapshot(&tx);
+        let snap = match rx.try_recv().unwrap() {
+            PlayerEvent::Snapshot(s) => s,
+            other => panic!("expected snapshot event, got: {other:?}"),
+        };
+        assert_eq!(snap.volume_percent, 0);
     }
 }

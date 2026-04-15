@@ -284,8 +284,16 @@ impl TuiApp {
                 let label = if new_value { "on" } else { "off" };
                 self.state.status = Some(format!("root_only toggled: {label}"));
             }
-            Action::SetMinSizeBytes(v) => {
-                self.state.cfg.settings.min_size_bytes = v;
+            Action::SetMinSizeKb(v) => {
+                let bytes = match v.checked_mul(1024) {
+                    Some(b) => b,
+                    None => {
+                        self.state.status = Some("settings.min_size_kb is too large".to_string());
+                        return Ok(());
+                    }
+                };
+                self.state.cfg.settings.min_size_kb = v;
+                self.state.cfg.settings.min_size_bytes = bytes;
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
                 self.state.status = Some("settings saved".to_string());
@@ -330,7 +338,7 @@ impl TuiApp {
                 }
 
                 let req =
-                    self.active_folders_scan_request(ScanOrigin::PlayFromLibrary { start_index });
+                    self.active_folders_scan_request(ScanOrigin::PlayFromLibrary { start_index })?;
                 self.request_scan(req);
                 // If the scan spawner completes synchronously (tests), apply immediately.
                 self.poll_scan_job_completion();
@@ -378,7 +386,7 @@ impl TuiApp {
                     self.state.status = Some("no folders configured to scan".to_string());
                     return Ok(());
                 }
-                let req = self.active_folders_scan_request(ScanOrigin::RescanLibrary);
+                let req = self.active_folders_scan_request(ScanOrigin::RescanLibrary)?;
                 self.request_scan(req);
                 // If the scan spawner completes synchronously (tests), apply immediately.
                 self.poll_scan_job_completion();
@@ -466,8 +474,9 @@ impl TuiApp {
                         .save_playlists(&self.state.paths, &self.state.playlists)?;
 
                     // Proactively rescan so the library/queue view matches the newly active playlist.
-                    let req = self
-                        .active_folders_scan_request(ScanOrigin::LoadPlaylist { stopped_playback });
+                    let req = self.active_folders_scan_request(ScanOrigin::LoadPlaylist {
+                        stopped_playback,
+                    })?;
                     self.request_scan(req);
                     // If the scan spawner completes synchronously (tests), apply immediately.
                     self.poll_scan_job_completion();
@@ -477,7 +486,16 @@ impl TuiApp {
         Ok(())
     }
 
-    fn active_folders_scan_request(&self, origin: ScanOrigin) -> ScanRequest {
+    fn active_folders_scan_request(&self, origin: ScanOrigin) -> AppResult<ScanRequest> {
+        let min_size_bytes = self
+            .state
+            .cfg
+            .settings
+            .min_size_kb
+            .checked_mul(1024)
+            .ok_or_else(|| AppError::Config {
+                message: "settings.min_size_kb is too large".to_string(),
+            })?;
         let folders = self
             .state
             .cfg
@@ -488,16 +506,16 @@ impl TuiApp {
                 root_only: f.root_only,
             })
             .collect::<Vec<_>>();
-        ScanRequest {
+        Ok(ScanRequest {
             folders,
             opts: ScanOptions {
                 supported_extensions: self.state.cfg.settings.supported_extensions.clone(),
-                min_size_bytes: self.state.cfg.settings.min_size_bytes,
+                min_size_bytes,
                 allow_name_size_fallback_dedup: true,
                 force_canonicalize_fail: false,
             },
             origin,
-        }
+        })
     }
 
     fn load_queue_from_current_library(&mut self, start_index: usize) {
@@ -733,6 +751,7 @@ mod tests {
 
     use super::*;
     use crate::config::{AppConfig, RepeatMode};
+    use crate::error::AppError;
     use crate::indexer::{LibraryIndex, TrackEntry, TrackId};
     use crate::paths::AppPaths;
     use crate::player::PlaybackStatus;
@@ -968,9 +987,10 @@ mod tests {
         let pls = PlaylistsFile::default();
         let (mut app, mock) = app_with_mock(paths, cfg, pls);
 
-        app.apply(Action::SetMinSizeBytes(123)).unwrap();
+        app.apply(Action::SetMinSizeKb(123)).unwrap();
         assert_eq!(mock.config_writes(), 1);
-        assert_eq!(app.state.cfg.settings.min_size_bytes, 123);
+        assert_eq!(app.state.cfg.settings.min_size_kb, 123);
+        assert_eq!(app.state.cfg.settings.min_size_bytes, 123 * 1024);
 
         app.apply(Action::ToggleShuffle).unwrap();
         assert_eq!(mock.config_writes(), 2);
@@ -1293,6 +1313,50 @@ mod tests {
     }
 
     #[test]
+    fn t2_scan_options_min_size_bytes_is_derived_from_min_size_kb_not_stale_min_size_bytes_field() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = 5;
+        cfg.settings.min_size_bytes = 999_999; // must be ignored at scan boundary
+        cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
+
+        let (app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
+
+        let req = app
+            .active_folders_scan_request(ScanOrigin::RescanLibrary)
+            .unwrap();
+        assert_eq!(req.opts.min_size_bytes, 5 * 1024);
+    }
+
+    #[test]
+    fn t2_scan_options_min_size_kb_overflow_returns_config_error() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = u64::MAX;
+        cfg.settings.min_size_bytes = 0;
+        cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
+
+        let (app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
+
+        let err = app
+            .active_folders_scan_request(ScanOrigin::RescanLibrary)
+            .unwrap_err();
+        match err {
+            AppError::Config { message } => {
+                assert!(
+                    message.contains("settings.min_size_kb is too large"),
+                    "message was: {message}"
+                );
+            }
+            other => panic!("expected AppError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ost_008_load_playlist_while_playing_stops_and_rescans_non_empty() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
@@ -1301,7 +1365,8 @@ mod tests {
         write_dummy_file(&track, 16);
 
         let mut cfg = AppConfig::default();
-        cfg.settings.min_size_bytes = 1;
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
         cfg.folders = vec![FolderEntry::new("X".to_string())];
 
         let mut pls = PlaylistsFile::default();
@@ -1337,7 +1402,8 @@ mod tests {
         let paths = paths_for(td.path());
 
         let mut cfg = AppConfig::default();
-        cfg.settings.min_size_bytes = 1;
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
         cfg.folders = vec![FolderEntry::new("X".to_string())];
 
         let mut pls = PlaylistsFile::default();
@@ -1372,7 +1438,8 @@ mod tests {
         fs::create_dir_all(&empty_dir).unwrap();
 
         let mut cfg = AppConfig::default();
-        cfg.settings.min_size_bytes = 1;
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
         cfg.folders = vec![FolderEntry::new(empty_dir.to_string_lossy().to_string())];
 
         let (mut app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
@@ -1402,7 +1469,8 @@ mod tests {
         write_dummy_file(&t2, 16);
 
         let mut cfg = AppConfig::default();
-        cfg.settings.min_size_bytes = 1;
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
         cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
 
         let (mut app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
@@ -1430,7 +1498,8 @@ mod tests {
         write_dummy_file(&track, 16);
 
         let mut cfg = AppConfig::default();
-        cfg.settings.min_size_bytes = 1;
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
         cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
 
         let (mut app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
@@ -1449,7 +1518,8 @@ mod tests {
         let paths = paths_for(td.path());
 
         let mut cfg = AppConfig::default();
-        cfg.settings.min_size_bytes = 1;
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
         cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
 
         let manual = ManualScanSpawner::default();
@@ -1499,7 +1569,8 @@ mod tests {
         let paths = paths_for(td.path());
 
         let mut cfg = AppConfig::default();
-        cfg.settings.min_size_bytes = 1;
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
         cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
 
         let manual = ManualScanSpawner::default();
@@ -1563,7 +1634,8 @@ mod tests {
         let paths = paths_for(td.path());
 
         let mut cfg = AppConfig::default();
-        cfg.settings.min_size_bytes = 1;
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
         cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
 
         let manual = ManualScanSpawner::default();
@@ -1641,6 +1713,7 @@ mod tests {
                 current_path: Some(std::path::PathBuf::from("bad.ogg")),
                 shuffle: false,
                 repeat: RepeatMode::Off,
+                volume_percent: 50,
                 queue_pos: Some(0),
                 queue_len: 2,
                 track_position: std::time::Duration::from_secs(0),
@@ -1667,6 +1740,7 @@ mod tests {
                 current_path: Some(std::path::PathBuf::from("good.ogg")),
                 shuffle: false,
                 repeat: RepeatMode::Off,
+                volume_percent: 50,
                 queue_pos: Some(1),
                 queue_len: 2,
                 track_position: std::time::Duration::from_secs(1),

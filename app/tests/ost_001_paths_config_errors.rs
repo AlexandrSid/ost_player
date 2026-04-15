@@ -94,7 +94,8 @@ fn load_or_create_creates_default_config_when_missing() {
 
     let cfg = config_io::load_or_create(&paths).expect("missing config should be created");
     assert!(paths.config_path.is_file(), "config should be created");
-    assert_eq!(cfg.settings.min_size_bytes, 1_000_000);
+    assert_eq!(cfg.settings.min_size_kb, 1024);
+    assert_eq!(cfg.settings.min_size_bytes, 1024 * 1024);
     assert!(!cfg.settings.shuffle);
     assert!(matches!(cfg.settings.repeat, RepeatMode::Off));
     assert!(cfg.folders.is_empty());
@@ -108,7 +109,7 @@ fn load_or_create_parses_valid_yaml() {
 
     let yaml = r#"
 settings:
-  min_size_bytes: 123
+  min_size_kb: 123
   shuffle: true
   repeat: all
   supported_extensions: ["mp3", "ogg"]
@@ -119,7 +120,8 @@ folders:
     fs::write(&paths.config_path, yaml).unwrap();
 
     let cfg = config_io::load_or_create(&paths).unwrap();
-    assert_eq!(cfg.settings.min_size_bytes, 123);
+    assert_eq!(cfg.settings.min_size_kb, 123);
+    assert_eq!(cfg.settings.min_size_bytes, 123 * 1024);
     assert!(cfg.settings.shuffle);
     assert!(matches!(cfg.settings.repeat, RepeatMode::All));
     assert_eq!(
@@ -195,7 +197,8 @@ fn app_error_display_includes_path_for_io_errors() {
 #[test]
 fn app_config_default_is_stable() {
     let cfg = AppConfig::default();
-    assert_eq!(cfg.settings.min_size_bytes, 1_000_000);
+    assert_eq!(cfg.settings.min_size_kb, 1024);
+    assert_eq!(cfg.settings.min_size_bytes, 1024 * 1024);
     assert!(!cfg.settings.shuffle);
     assert!(matches!(cfg.settings.repeat, RepeatMode::Off));
     assert!(cfg.folders.is_empty());

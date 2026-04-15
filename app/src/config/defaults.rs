@@ -4,8 +4,13 @@ use super::{
 };
 
 pub fn default_settings() -> SettingsConfig {
+    let min_size_kb = default_min_size_kb();
+    let min_size_bytes = min_size_kb
+        .checked_mul(1024)
+        .expect("default_min_size_kb must not overflow when converting to bytes");
     SettingsConfig {
-        min_size_bytes: default_min_size_bytes(),
+        min_size_kb,
+        min_size_bytes,
         shuffle: false,
         repeat: RepeatMode::Off,
         supported_extensions: default_supported_extensions(),
@@ -13,8 +18,8 @@ pub fn default_settings() -> SettingsConfig {
     }
 }
 
-pub fn default_min_size_bytes() -> u64 {
-    1_000_000
+pub fn default_min_size_kb() -> u64 {
+    1024
 }
 
 pub fn default_supported_extensions() -> Vec<String> {
