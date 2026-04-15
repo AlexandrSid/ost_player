@@ -1,5 +1,6 @@
 mod terminal;
 mod ui;
+mod scan_indicator;
 
 pub mod action;
 pub mod app;

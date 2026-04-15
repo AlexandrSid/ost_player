@@ -35,12 +35,24 @@ impl TextInput {
                 self.backspace();
                 None
             }
+            KeyCode::Delete => {
+                self.delete();
+                None
+            }
             KeyCode::Left => {
                 self.move_left();
                 None
             }
             KeyCode::Right => {
                 self.move_right();
+                None
+            }
+            KeyCode::Home => {
+                self.move_home();
+                None
+            }
+            KeyCode::End => {
+                self.move_end();
                 None
             }
             KeyCode::Char(c) => {
@@ -94,7 +106,17 @@ impl TextInput {
 
         // Choose a start grapheme index such that the cursor is always visible.
         // If it doesn't fit, scroll so the cursor lands at the rightmost visible column.
-        let start_cells = cursor_cells.saturating_sub(max_cursor_x);
+        //
+        // When scrolled, keep the cursor at `max_cursor_x` (i.e., `width-1`) so it always
+        // remains within 0..width-1 and lands on the rightmost visible column.
+        //
+        // Special case: when the cursor is at the end (caret after the last grapheme), we want
+        // to show a full `width` cells of content when possible (e.g. width=4 => "3456", not "456").
+        let start_cells = if cursor == total_graphemes {
+            cursor_cells.saturating_sub(width)
+        } else {
+            cursor_cells.saturating_sub(max_cursor_x)
+        };
         let mut start_g = 0usize;
         // Find first grapheme boundary whose cumulative width is >= start_cells.
         // This intentionally tolerates zero-width chars.
@@ -148,6 +170,19 @@ impl TextInput {
         self.cursor -= 1;
     }
 
+    fn delete(&mut self) {
+        self.clamp_cursor();
+        let total = self.value.graphemes(true).count();
+        if self.cursor >= total {
+            return;
+        }
+        let start = byte_index_for_grapheme_pos(&self.value, self.cursor);
+        let end = byte_index_for_grapheme_pos(&self.value, self.cursor + 1);
+        self.value.drain(start..end);
+        // Cursor stays at same grapheme index.
+        self.clamp_cursor();
+    }
+
     fn move_left(&mut self) {
         self.clamp_cursor();
         self.cursor = self.cursor.saturating_sub(1);
@@ -157,6 +192,14 @@ impl TextInput {
         self.clamp_cursor();
         let total = self.value.graphemes(true).count();
         self.cursor = (self.cursor + 1).min(total);
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = self.value.graphemes(true).count();
     }
 
     fn clamp_cursor(&mut self) {
@@ -233,6 +276,24 @@ mod tests {
     }
 
     #[test]
+    fn text_input_delete_deletes_char_at_cursor_and_keeps_cursor_position() {
+        let mut ti = TextInput::new("t", "abcd", "h");
+        ti.cursor = 1; // at 'b'
+        ti.on_key(key(KeyCode::Delete)); // delete 'b'
+        assert_eq!(ti.value, "acd");
+        assert_eq!(ti.cursor, 1);
+    }
+
+    #[test]
+    fn text_input_delete_at_end_is_noop() {
+        let mut ti = TextInput::new("t", "abc", "h");
+        ti.cursor = ti.value.graphemes(true).count();
+        ti.on_key(key(KeyCode::Delete));
+        assert_eq!(ti.value, "abc");
+        assert_eq!(ti.cursor, 3);
+    }
+
+    #[test]
     fn text_input_backspace_at_start_is_noop() {
         let mut ti = TextInput::new("t", "abc", "h");
         ti.cursor = 0;
@@ -252,6 +313,16 @@ mod tests {
         ti.cursor = ti.value.graphemes(true).count();
         ti.on_key(key(KeyCode::Right));
         assert_eq!(ti.cursor, ti.value.graphemes(true).count());
+    }
+
+    #[test]
+    fn text_input_home_end_move_to_bounds() {
+        let mut ti = TextInput::new("t", "abc", "h");
+        ti.cursor = 1;
+        ti.on_key(key(KeyCode::Home));
+        assert_eq!(ti.cursor, 0);
+        ti.on_key(key(KeyCode::End));
+        assert_eq!(ti.cursor, 3);
     }
 
     #[test]
@@ -330,6 +401,163 @@ mod tests {
 
         // Cursor at end should force window to include the last char.
         assert!(visible.ends_with('c'));
+    }
+
+    #[test]
+    fn text_input_display_for_width_shows_prefix_when_cursor_at_start() {
+        let mut ti = TextInput::new("t", "0123456789", "h");
+        ti.cursor = 0;
+        let (visible, cursor_x) = ti.display_for_width(4);
+        assert_eq!(cursor_x, 0);
+        assert_eq!(visible, "0123");
+    }
+
+    #[test]
+    fn text_input_display_for_width_moves_window_when_cursor_moves_left_and_right() {
+        let mut ti = TextInput::new("t", "0123456789", "h");
+        let width = 4u16;
+
+        // Cursor at end => show suffix.
+        ti.cursor = 10;
+        let (visible_end, cx_end) = ti.display_for_width(width);
+        assert_eq!(cx_end, 3);
+        assert_eq!(visible_end, "6789");
+
+        // Move left within the suffix window: still suffix.
+        ti.cursor = 8; // before '8'
+        let (visible_mid, cx_mid) = ti.display_for_width(width);
+        assert_eq!(visible_mid, "5678");
+        assert_eq!(cx_mid, 3);
+
+        // Move further left: window should shift left.
+        ti.cursor = 2; // before '2'
+        let (visible_left, cx_left) = ti.display_for_width(width);
+        assert_eq!(visible_left, "0123");
+        assert_eq!(cx_left, 2);
+    }
+
+    #[test]
+    fn text_input_display_for_width_keeps_cursor_visible_after_insert_and_delete_in_middle() {
+        let width = 6u16;
+        let mut ti = TextInput::new("t", "abcdefghijklmnopqrstuvwxyz", "h");
+
+        // Put cursor somewhere in the middle, force scrolling.
+        ti.cursor = 20; // before 'u'
+        let (vis1, cx1) = ti.display_for_width(width);
+        assert!(cx1 < width);
+        let vis1_cells: usize = vis1
+            .chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum();
+        assert!(vis1_cells <= width as usize);
+
+        // Insert increases length; cursor should advance and remain visible.
+        ti.on_key(key(KeyCode::Char('X')));
+        let (_vis2, cx2) = ti.display_for_width(width);
+        assert!(cx2 < width);
+
+        // Delete should remove the grapheme at cursor (currently the old 'u') and keep cursor visible.
+        ti.on_key(key(KeyCode::Delete));
+        let (_vis3, cx3) = ti.display_for_width(width);
+        assert!(cx3 < width);
+    }
+
+    #[test]
+    fn text_input_append_beyond_width_shows_suffix_and_cursor_at_right_edge() {
+        let mut ti = TextInput::new("t", "", "h");
+        let width = 4u16;
+
+        for c in ['0', '1', '2', '3', '4', '5', '6'] {
+            ti.on_key(key(KeyCode::Char(c)));
+        }
+
+        let (visible, cursor_x) = ti.display_for_width(width);
+        assert_eq!(ti.value, "0123456");
+        assert_eq!(visible, "3456");
+        assert_eq!(cursor_x, 3, "cursor at end should land at rightmost column");
+    }
+
+    #[test]
+    fn text_input_left_right_moves_window_across_boundaries_via_keys() {
+        let mut ti = TextInput::new("t", "0123456789", "h");
+        let width = 4u16;
+
+        // Start at end => show suffix.
+        let (v_end, cx_end) = ti.display_for_width(width);
+        assert_eq!(v_end, "6789");
+        assert_eq!(cx_end, 3);
+
+        // Move left across the left edge of the window; the window should shift left.
+        for _ in 0..4 {
+            ti.on_key(key(KeyCode::Left));
+        }
+        // Cursor now before '6' (index 6) => window should end at '6'.
+        let (v_left, cx_left) = ti.display_for_width(width);
+        assert_eq!(v_left, "3456");
+        assert_eq!(cx_left, 3);
+
+        // Move further left into the prefix window.
+        for _ in 0..4 {
+            ti.on_key(key(KeyCode::Left));
+        }
+        let (v_prefix, cx_prefix) = ti.display_for_width(width);
+        assert_eq!(v_prefix, "0123");
+        assert_eq!(cx_prefix, 2);
+
+        // Move right across the right edge; the window should shift right again.
+        for _ in 0..5 {
+            ti.on_key(key(KeyCode::Right));
+        }
+        let (v_right, cx_right) = ti.display_for_width(width);
+        assert_eq!(v_right, "4567");
+        assert_eq!(cx_right, 3);
+    }
+
+    #[test]
+    fn text_input_home_end_with_long_string_updates_visible_window() {
+        let mut ti = TextInput::new("t", "abcdefghijklmnopqrstuvwxyz", "h");
+        let width = 6u16;
+
+        ti.cursor = 20;
+        ti.on_key(key(KeyCode::Home));
+        let (v_home, cx_home) = ti.display_for_width(width);
+        assert_eq!(ti.cursor, 0);
+        assert_eq!(v_home, "abcdef");
+        assert_eq!(cx_home, 0);
+
+        ti.on_key(key(KeyCode::End));
+        let (v_end, cx_end) = ti.display_for_width(width);
+        assert_eq!(ti.cursor, 26);
+        assert_eq!(v_end, "uvwxyz");
+        assert_eq!(cx_end, 5);
+    }
+
+    #[test]
+    fn text_input_delete_and_backspace_work_consistently_in_scrolled_window() {
+        let mut ti = TextInput::new("t", "0123456789", "h");
+        let width = 4u16;
+
+        // Put cursor before '6' so the view is scrolled.
+        ti.cursor = 6;
+        let (v0, cx0) = ti.display_for_width(width);
+        assert_eq!(v0, "3456");
+        assert_eq!(cx0, 3);
+
+        // Backspace removes '5' (before cursor) and moves cursor left.
+        ti.on_key(key(KeyCode::Backspace));
+        assert_eq!(ti.value, "012346789");
+        assert_eq!(ti.cursor, 5);
+        let (v1, cx1) = ti.display_for_width(width);
+        assert_eq!(v1, "2346");
+        assert_eq!(cx1, 3);
+
+        // Delete removes '6' (at cursor) and keeps cursor position.
+        ti.on_key(key(KeyCode::Delete));
+        assert_eq!(ti.value, "01234789");
+        assert_eq!(ti.cursor, 5);
+        let (v2, cx2) = ti.display_for_width(width);
+        assert_eq!(v2, "2347");
+        assert_eq!(cx2, 3);
     }
 
     #[test]
