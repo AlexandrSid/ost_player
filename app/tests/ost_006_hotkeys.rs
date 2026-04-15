@@ -17,6 +17,157 @@ fn hs_mods(mods: &[HotkeyModifier]) -> HashSet<HotkeyModifier> {
 }
 
 #[test]
+fn volume_hotkeys_missing_fields_default_to_defaults() {
+    // TZVOL-002: if new fields are absent, they should take default bindings.
+    let raw = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3]
+folders: []
+hotkeys:
+  timings:
+    hold_threshold_ms: 333
+  bindings:
+    play_pause: { modifiers: [ctrl, right_shift], key: up }
+"#;
+
+    let cfg: AppConfig = parse_yaml(raw);
+    let defaults = AppConfig::default();
+
+    assert_eq!(
+        cfg.hotkeys.bindings.volume_up, defaults.hotkeys.bindings.volume_up,
+        "missing hotkeys.bindings.volume_up should default"
+    );
+    assert_eq!(
+        cfg.hotkeys.bindings.volume_down, defaults.hotkeys.bindings.volume_down,
+        "missing hotkeys.bindings.volume_down should default"
+    );
+}
+
+#[test]
+fn volume_hotkeys_explicit_null_disables_but_missing_other_field_defaults() {
+    // TZVOL-002: explicit null disables; missing uses defaults.
+    let raw = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3]
+folders: []
+hotkeys:
+  bindings:
+    volume_up: null
+"#;
+
+    let cfg: AppConfig = parse_yaml(raw);
+    let defaults = AppConfig::default();
+
+    assert!(
+        cfg.hotkeys.bindings.volume_up.is_none(),
+        "explicit null should disable volume_up"
+    );
+    assert_eq!(
+        cfg.hotkeys.bindings.volume_down, defaults.hotkeys.bindings.volume_down,
+        "missing volume_down should default even if volume_up is null"
+    );
+}
+
+#[test]
+fn volume_hotkeys_back_compat_when_hotkeys_section_missing_uses_defaults() {
+    // Backwards compatibility: older configs with no `hotkeys` section should still get defaults.
+    let raw = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3, ogg]
+folders: []
+"#;
+
+    let cfg: AppConfig = parse_yaml(raw);
+    let defaults = AppConfig::default();
+
+    assert_eq!(
+        cfg.hotkeys.bindings.volume_up,
+        defaults.hotkeys.bindings.volume_up
+    );
+    assert_eq!(
+        cfg.hotkeys.bindings.volume_down,
+        defaults.hotkeys.bindings.volume_down
+    );
+}
+
+#[test]
+fn volume_defaults_come_from_config_defaults_when_audio_section_missing() {
+    let raw = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3]
+folders: []
+"#;
+
+    let cfg: AppConfig = parse_yaml(raw);
+    assert_eq!(cfg.audio.default_volume_percent, 75);
+    assert_eq!(cfg.audio.volume_step_percent, 5);
+}
+
+#[test]
+fn volume_defaults_can_be_overridden_in_config() {
+    let raw = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3]
+folders: []
+audio:
+  default_volume_percent: 42
+  volume_step_percent: 7
+"#;
+
+    let cfg: AppConfig = parse_yaml(raw);
+    assert_eq!(cfg.audio.default_volume_percent, 42);
+    assert_eq!(cfg.audio.volume_step_percent, 7);
+}
+
+#[test]
+fn hotkeys_bindings_unknown_fields_roundtrip_stable_including_volume_fields() {
+    // TZVOL-002: unknown fields under `hotkeys.bindings` must survive roundtrip via flatten.
+    let raw = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3, ogg]
+folders: []
+hotkeys:
+  bindings:
+    volume_up: null
+    volume_down: { modifiers: [left_ctrl, right_shift], key: page_down }
+    future_binding:
+      nested: [1, 2, 3]
+      enabled: true
+"#;
+
+    let cfg: AppConfig = parse_yaml(raw);
+    assert!(cfg.hotkeys.bindings.volume_up.is_none());
+    assert!(cfg.hotkeys.bindings.volume_down.is_some());
+    assert!(cfg.hotkeys.bindings.extra.contains_key("future_binding"));
+
+    let serialized = serde_yaml::to_string(&cfg).expect("should serialize");
+    let v = yaml_value(&serialized);
+    let bindings = v
+        .get("hotkeys")
+        .and_then(|h| h.get("bindings"))
+        .expect("hotkeys.bindings must exist after serialize");
+
+    assert!(
+        bindings.get("future_binding").is_some(),
+        "future_binding should survive roundtrip"
+    );
+    assert!(
+        bindings.get("volume_up").is_some(),
+        "volume_up (null) should survive roundtrip"
+    );
+    assert!(
+        bindings.get("volume_down").is_some(),
+        "volume_down should survive roundtrip"
+    );
+}
+
+#[test]
 fn hotkeys_config_roundtrip_preserves_unknown_hotkeys_bindings_fields() {
     let raw = r#"
 schema_version: 1
@@ -33,6 +184,7 @@ hotkeys:
     next:
       chord: { modifiers: [ctrl, right_shift], key: right }
       hold: { action: seek_step, direction: 1 }
+    volume_up: null
     future_binding: 123
 "#;
 
@@ -40,6 +192,7 @@ hotkeys:
     assert_eq!(cfg.hotkeys.timings.hold_threshold_ms, 333);
     assert_eq!(cfg.hotkeys.timings.repeat_interval_ms, 222);
     assert_eq!(cfg.hotkeys.timings.seek_step_seconds, 7);
+    assert!(cfg.hotkeys.bindings.volume_up.is_none());
     assert!(cfg.hotkeys.bindings.extra.contains_key("future_binding"));
 
     let serialized = serde_yaml::to_string(&cfg).expect("should serialize");

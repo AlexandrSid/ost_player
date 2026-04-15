@@ -1,7 +1,7 @@
+use super::{AudioConfig, HotkeysConfig, HotkeysTimings, RepeatMode, SettingsConfig};
 use super::{
     HotkeyChord, HotkeyHoldAction, HotkeyKey, HotkeyModifier, HotkeysBindings, TapHoldBinding,
 };
-use super::{HotkeysConfig, HotkeysTimings, RepeatMode, SettingsConfig};
 
 pub fn default_settings() -> SettingsConfig {
     SettingsConfig {
@@ -51,7 +51,39 @@ pub fn default_hotkeys() -> HotkeysConfig {
                 modifiers: vec![HotkeyModifier::Ctrl, HotkeyModifier::RightShift],
                 key: HotkeyKey::S,
             }),
+            volume_up: default_hotkey_volume_up(),
+            volume_down: default_hotkey_volume_down(),
             extra: Default::default(),
         },
     }
+}
+
+pub fn default_hotkey_volume_up() -> Option<HotkeyChord> {
+    Some(HotkeyChord {
+        modifiers: vec![HotkeyModifier::LeftCtrl, HotkeyModifier::RightShift],
+        key: HotkeyKey::PageUp,
+    })
+}
+
+pub fn default_hotkey_volume_down() -> Option<HotkeyChord> {
+    Some(HotkeyChord {
+        modifiers: vec![HotkeyModifier::LeftCtrl, HotkeyModifier::RightShift],
+        key: HotkeyKey::PageDown,
+    })
+}
+
+pub fn default_audio() -> AudioConfig {
+    AudioConfig {
+        default_volume_percent: default_volume_default_percent(),
+        volume_step_percent: default_volume_step_percent(),
+        extra: Default::default(),
+    }
+}
+
+pub fn default_volume_default_percent() -> u8 {
+    75
+}
+
+pub fn default_volume_step_percent() -> u8 {
+    5
 }

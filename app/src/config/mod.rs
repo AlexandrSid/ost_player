@@ -81,6 +81,7 @@ pub enum HotkeyModifier {
     Alt,
     Shift,
     Win,
+    LeftCtrl,
     LeftShift,
     RightShift,
 }
@@ -93,14 +94,37 @@ pub enum HotkeyKey {
     Left,
     Right,
     Space,
+    PageUp,
+    PageDown,
     S,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HotkeyChord {
     #[serde(default)]
     pub modifiers: Vec<HotkeyModifier>,
     pub key: HotkeyKey,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioConfig {
+    /// Initial volume for the current app session, in percent (0..=100).
+    #[serde(default = "defaults::default_volume_default_percent")]
+    pub default_volume_percent: u8,
+
+    /// Amount to change volume per hotkey press, in percent (1..=100).
+    #[serde(default = "defaults::default_volume_step_percent")]
+    pub volume_step_percent: u8,
+
+    /// Preserve unknown `audio.*` fields for forward compatibility.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        defaults::default_audio()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +167,14 @@ pub struct HotkeysBindings {
     #[serde(default)]
     pub shuffle_toggle: Option<HotkeyChord>,
 
+    /// Volume up (tap-only).
+    #[serde(default = "defaults::default_hotkey_volume_up")]
+    pub volume_up: Option<HotkeyChord>,
+
+    /// Volume down (tap-only).
+    #[serde(default = "defaults::default_hotkey_volume_down")]
+    pub volume_down: Option<HotkeyChord>,
+
     /// Preserve unknown `hotkeys.bindings.*` fields for forward compatibility.
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
@@ -178,6 +210,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub hotkeys: HotkeysConfig,
+
+    #[serde(default)]
+    pub audio: AudioConfig,
 
     /// Preserve unknown top-level fields when reading/writing.
     #[serde(flatten)]
@@ -217,6 +252,14 @@ impl AppConfig {
             return Err("hotkeys.timings.seek_step_seconds must be within 1..=3600".to_string());
         }
 
+        // Audio: basic ranges.
+        if self.audio.default_volume_percent > 100 {
+            return Err("audio.default_volume_percent must be within 0..=100".to_string());
+        }
+        if self.audio.volume_step_percent == 0 || self.audio.volume_step_percent > 100 {
+            return Err("audio.volume_step_percent must be within 1..=100".to_string());
+        }
+
         Ok(())
     }
 
@@ -239,6 +282,7 @@ impl Default for AppConfig {
             settings: SettingsConfig::default(),
             folders: Vec::new(),
             hotkeys: HotkeysConfig::default(),
+            audio: AudioConfig::default(),
             extra: BTreeMap::new(),
         }
     }

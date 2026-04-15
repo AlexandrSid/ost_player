@@ -107,10 +107,23 @@ hotkeys:
     shuffle_toggle:
       modifiers: [ctrl, rshift]
       key: S
+
+    volume_up:                       # (optional) Global hotkey to increase volume
+      modifiers: [lctrl, rshift]
+      key: PageUp
+
+    volume_down:                     # (optional) Global hotkey to decrease volume
+      modifiers: [lctrl, rshift]
+      key: PageDown
+
+audio:
+  default_volume_percent: 75        # Initial volume on app startup (0-100, default: 75)
+  volume_step_percent: 5            # Volume change per hotkey press (default: 5)
 ```
 
 > **Note**: Hotkeys use modifier aliases:
 > - `ctrl` = Ctrl
+> - `lctrl` = Left Ctrl
 > - `lshift`, `rshift` = Left/Right Shift
 > - `lalt`, `ralt` = Left/Right Alt
 > - `lwin`, `rwin` = Left/Right Windows key
@@ -144,8 +157,16 @@ All hotkeys default to **Ctrl + Right Shift + [Key]** and work globally:
 | **Previous** | Ctrl+RightShift+← | Tap: go to previous track; Hold: seek backward (-5s repeatedly) |
 | **Repeat Toggle** | Ctrl+RightShift+↓ | Cycle: Off → All → One |
 | **Shuffle Toggle** | Ctrl+RightShift+S | On/off |
+| **Volume Up** | LeftCtrl+RightShift+PageUp | Increase volume by 5% (tap-only, 0–100% range) |
+| **Volume Down** | LeftCtrl+RightShift+PageDown | Decrease volume by 5% (tap-only, 0–100% range) |
 
 **Customization**: Edit `config.yaml`'s `hotkeys.bindings` section. Use any key and modifier combination; conflicts are reported at startup and that binding is skipped.
+
+**Volume Hotkeys**: 
+- Volume is **global to the entire app** (not per-track).
+- Volume **does not persist** across app restarts; it resets to `audio.default_volume_percent` (default: 75%).
+- Disable any volume hotkey by setting it to `null` (e.g., `volume_up: null`).
+- **Windows note**: `RegisterHotKey` API doesn't strictly distinguish Left vs. Right modifiers; both `LeftCtrl` and `RightCtrl` may trigger, and both `LeftShift` and `RightShift` may trigger—this is a platform limitation.
 
 ## TUI Menus
 

@@ -14,6 +14,7 @@ trait AudioSinkLike {
     fn play(&self);
     fn pause(&self);
     fn stop(&self);
+    fn set_volume(&self, volume: f32);
     fn empty(&self) -> bool;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -52,6 +53,9 @@ impl AudioSinkLike for RodioSink {
     }
     fn stop(&self) {
         self.0.stop();
+    }
+    fn set_volume(&self, volume: f32) {
+        self.0.set_volume(volume);
     }
     fn empty(&self) -> bool {
         self.0.empty()
@@ -132,7 +136,7 @@ impl Default for PlayerSnapshot {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerCommand {
     LoadQueue {
         tracks: Vec<PathBuf>,
@@ -145,6 +149,8 @@ pub enum PlayerCommand {
     SeekRelativeSeconds(i64),
     SetShuffle(bool),
     SetRepeat(RepeatMode),
+    SetVolumePercent(u8),
+    AdjustVolumePercent(i8),
     Shutdown,
 }
 
@@ -162,12 +168,23 @@ pub struct PlayerHandle {
 }
 
 impl PlayerHandle {
-    pub fn spawn(initial_shuffle: bool, initial_repeat: RepeatMode) -> Self {
+    pub fn spawn(
+        initial_shuffle: bool,
+        initial_repeat: RepeatMode,
+        initial_volume_percent: u8,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
         let (evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
 
-        let join =
-            thread::spawn(move || playback_thread(cmd_rx, evt_tx, initial_shuffle, initial_repeat));
+        let join = thread::spawn(move || {
+            playback_thread(
+                cmd_rx,
+                evt_tx,
+                initial_shuffle,
+                initial_repeat,
+                initial_volume_percent,
+            )
+        });
 
         Self {
             cmd_tx,
@@ -269,8 +286,9 @@ fn playback_thread(
     evt_tx: mpsc::Sender<PlayerEvent>,
     initial_shuffle: bool,
     initial_repeat: RepeatMode,
+    initial_volume_percent: u8,
 ) {
-    let mut engine = Engine::new(initial_shuffle, initial_repeat);
+    let mut engine = Engine::new(initial_shuffle, initial_repeat, initial_volume_percent);
     engine.emit_snapshot(&evt_tx);
 
     let tick = Duration::from_millis(100);
@@ -310,15 +328,17 @@ struct Engine {
     status: PlaybackStatus,
     shuffle: bool,
     repeat: RepeatMode,
+    volume_percent: u8,
     current_path: Option<PathBuf>,
     current_duration: Option<Duration>,
     last_error: Option<String>,
 }
 
 impl Engine {
-    fn new(shuffle: bool, repeat: RepeatMode) -> Self {
+    fn new(shuffle: bool, repeat: RepeatMode, initial_volume_percent: u8) -> Self {
         let mut backend = RodioBackend::new();
         let backend_available = backend.try_init().is_ok();
+        let volume_percent = initial_volume_percent.min(100);
         Self {
             backend: Box::new(backend),
             backend_available,
@@ -327,6 +347,7 @@ impl Engine {
             status: PlaybackStatus::Stopped,
             shuffle,
             repeat,
+            volume_percent,
             current_path: None,
             current_duration: None,
             last_error: None,
@@ -334,9 +355,15 @@ impl Engine {
     }
 
     #[cfg(test)]
-    fn new_with_backend(shuffle: bool, repeat: RepeatMode, backend: Box<dyn AudioBackend>) -> Self {
+    fn new_with_backend(
+        shuffle: bool,
+        repeat: RepeatMode,
+        backend: Box<dyn AudioBackend>,
+        initial_volume_percent: u8,
+    ) -> Self {
         let mut backend = backend;
         let backend_available = backend.try_init().is_ok();
+        let volume_percent = initial_volume_percent.min(100);
         Self {
             backend,
             backend_available,
@@ -345,6 +372,7 @@ impl Engine {
             status: PlaybackStatus::Stopped,
             shuffle,
             repeat,
+            volume_percent,
             current_path: None,
             current_duration: None,
             last_error: None,
@@ -413,6 +441,19 @@ impl Engine {
             }
             PlayerCommand::SetRepeat(v) => {
                 self.repeat = v;
+                Ok(())
+            }
+            PlayerCommand::SetVolumePercent(p) => {
+                self.set_volume_percent(p);
+                Ok(())
+            }
+            PlayerCommand::AdjustVolumePercent(delta) => {
+                let next = if delta.is_negative() {
+                    self.volume_percent.saturating_sub(delta.unsigned_abs())
+                } else {
+                    self.volume_percent.saturating_add(delta as u8)
+                };
+                self.set_volume_percent(next);
                 Ok(())
             }
             PlayerCommand::Shutdown => Ok(()),
@@ -593,6 +634,7 @@ impl Engine {
         // Build everything first; only commit state after success.
         let mut new_sink = self.backend.create_sink()?;
         let duration = self.backend.append_file(new_sink.as_mut(), &path)?;
+        new_sink.set_volume(volume_percent_to_rodio(self.volume_percent));
         new_sink.play();
 
         self.queue.set_pos_in_order(pos_in_order)?;
@@ -605,6 +647,14 @@ impl Engine {
         self.current_duration = duration;
         self.last_error = None;
         Ok(())
+    }
+
+    fn set_volume_percent(&mut self, percent: u8) {
+        self.volume_percent = percent.min(100);
+        let v = volume_percent_to_rodio(self.volume_percent);
+        if let Some(sink) = self.sink.as_ref() {
+            sink.set_volume(v);
+        }
     }
 
     fn with_sink(&self, f: impl FnOnce(&dyn AudioSinkLike)) {
@@ -656,6 +706,11 @@ enum SeekDirection {
     Backward,
 }
 
+fn volume_percent_to_rodio(percent: u8) -> f32 {
+    // Map 0..=100% to rodio sink volume 0.0..=1.0.
+    (percent.min(100) as f32) / 100.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,6 +732,7 @@ mod tests {
         fn play(&self) {}
         fn pause(&self) {}
         fn stop(&self) {}
+        fn set_volume(&self, _volume: f32) {}
         fn empty(&self) -> bool {
             self.empty.load(std::sync::atomic::Ordering::Relaxed)
         }
@@ -782,7 +838,7 @@ mod tests {
 
     #[test]
     fn play_pause_play_transitions_do_not_require_real_audio() {
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg"), p("b.ogg")],
             start_index: 0,
@@ -799,7 +855,7 @@ mod tests {
 
     #[test]
     fn stop_clears_current_path_and_status() {
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg")],
             start_index: 0,
@@ -820,7 +876,7 @@ mod tests {
     fn next_at_end_respects_repeat_all_vs_off() {
         let tracks = vec![p("a.ogg"), p("b.ogg")];
 
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: tracks.clone(),
             start_index: 1,
@@ -830,7 +886,7 @@ mod tests {
         assert_eq!(e.status, PlaybackStatus::Stopped);
         assert!(e.current_path.is_none());
 
-        let mut e = Engine::new_with_backend(false, RepeatMode::All, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::All, Box::new(backend_ok()), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks,
             start_index: 1,
@@ -846,7 +902,7 @@ mod tests {
 
     #[test]
     fn repeat_one_restarts_same_track_on_tick_end() {
-        let mut e = Engine::new_with_backend(false, RepeatMode::One, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::One, Box::new(backend_ok()), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg"), p("b.ogg")],
             start_index: 0,
@@ -870,7 +926,7 @@ mod tests {
 
     #[test]
     fn toggle_play_pause_when_stopped_with_no_queue_is_noop() {
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
         assert_eq!(e.status, PlaybackStatus::Stopped);
         e.on_command(PlayerCommand::TogglePlayPause).unwrap();
         assert_eq!(e.status, PlaybackStatus::Stopped);
@@ -879,7 +935,7 @@ mod tests {
 
     #[test]
     fn prev_at_start_stays_on_first_track() {
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg"), p("b.ogg")],
             start_index: 0,
@@ -900,7 +956,7 @@ mod tests {
 
     #[test]
     fn next_at_end_with_repeat_one_stops() {
-        let mut e = Engine::new_with_backend(false, RepeatMode::One, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::One, Box::new(backend_ok()), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg"), p("b.ogg")],
             start_index: 1,
@@ -918,7 +974,7 @@ mod tests {
 
     #[test]
     fn advance_after_end_repeat_off_stops_at_end() {
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg"), p("b.ogg")],
             start_index: 1,
@@ -943,7 +999,7 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let append_calls = backend.append_calls.clone();
 
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg"), p("b.ogg")],
             start_index: 0,
@@ -970,7 +1026,7 @@ mod tests {
         let mut ok = backend_ok();
         ok.fail_append = false;
 
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(ok));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(ok), 75);
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg"), p("b.ogg")],
             start_index: 0,
@@ -1000,7 +1056,7 @@ mod tests {
     #[test]
     fn fix_006_decode_failure_on_first_track_skips_to_next_and_sets_last_error() {
         let backend = FailFirstAppendBackend::new("decode failed: bad file");
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend), 75);
 
         e.on_command(PlayerCommand::LoadQueue {
             tracks: vec![p("a.ogg"), p("b.ogg")],
@@ -1039,7 +1095,7 @@ mod tests {
         // Establish last_error after playback failures.
         let mut bad = backend_ok();
         bad.fail_append = true;
-        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(bad));
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(bad), 75);
         e.queue
             .load(vec![p("a.ogg"), p("b.ogg")], 0, /*shuffle*/ false)
             .unwrap();
@@ -1070,5 +1126,31 @@ mod tests {
         e.last_error = Some("some error".to_string());
         e.stop();
         assert_eq!(e.last_error, None);
+    }
+
+    #[test]
+    fn adjust_volume_percent_clamps_to_0_and_100() {
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 50);
+        assert_eq!(e.volume_percent, 50);
+
+        // Up beyond 100 -> clamp to 100.
+        e.on_command(PlayerCommand::AdjustVolumePercent(80))
+            .unwrap();
+        assert_eq!(e.volume_percent, 100);
+
+        // Down beyond 0 -> clamp to 0.
+        e.on_command(PlayerCommand::AdjustVolumePercent(-120))
+            .unwrap();
+        assert_eq!(e.volume_percent, 0);
+    }
+
+    #[test]
+    fn adjust_volume_percent_uses_step_delta_exactly_when_in_range() {
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
+        e.on_command(PlayerCommand::AdjustVolumePercent(-5))
+            .unwrap();
+        assert_eq!(e.volume_percent, 70);
+        e.on_command(PlayerCommand::AdjustVolumePercent(5)).unwrap();
+        assert_eq!(e.volume_percent, 75);
     }
 }

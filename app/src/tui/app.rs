@@ -139,7 +139,11 @@ impl TuiApp {
         scan_spawner: Box<dyn ScanSpawner>,
     ) -> Self {
         let cached = indexer::io::load_best_effort(&paths).unwrap_or_default();
-        let player = PlayerHandle::spawn(cfg.settings.shuffle, cfg.settings.repeat);
+        let player = PlayerHandle::spawn(
+            cfg.settings.shuffle,
+            cfg.settings.repeat,
+            cfg.audio.default_volume_percent,
+        );
         let mut state = AppState::new(paths, cfg, pls, cached);
         state.player.shuffle = state.cfg.settings.shuffle;
         state.player.repeat = state.cfg.settings.repeat;
@@ -354,6 +358,18 @@ impl TuiApp {
             Action::PlayerSeekRelativeSeconds(delta) => {
                 if let Some(p) = self.player.as_ref() {
                     p.send(PlayerCommand::SeekRelativeSeconds(delta));
+                }
+            }
+            Action::VolumeUp => {
+                let step = self.state.cfg.audio.volume_step_percent.min(100) as i8;
+                if let Some(p) = self.player.as_ref() {
+                    p.send(PlayerCommand::AdjustVolumePercent(step));
+                }
+            }
+            Action::VolumeDown => {
+                let step = self.state.cfg.audio.volume_step_percent.min(100) as i8;
+                if let Some(p) = self.player.as_ref() {
+                    p.send(PlayerCommand::AdjustVolumePercent(-step));
                 }
             }
 
@@ -1669,6 +1685,59 @@ mod tests {
         assert_eq!(
             app.state.player.current_path.as_deref(),
             Some(std::path::Path::new("good.ogg"))
+        );
+    }
+
+    #[test]
+    fn volume_actions_send_adjust_volume_command_with_config_step_and_sign() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let mut cfg = AppConfig::default();
+        cfg.audio.volume_step_percent = 7;
+        let pls = PlaylistsFile::default();
+        let (mut app, _mock) = app_with_mock(paths, cfg, pls);
+
+        // Replace the real player handle with a controllable one.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.apply(Action::VolumeUp).unwrap();
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            PlayerCommand::AdjustVolumePercent(7)
+        );
+
+        app.apply(Action::VolumeDown).unwrap();
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            PlayerCommand::AdjustVolumePercent(-7)
+        );
+    }
+
+    #[test]
+    fn volume_actions_cap_step_to_100_before_sending() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let mut cfg = AppConfig::default();
+        cfg.audio.volume_step_percent = 250;
+        let pls = PlaylistsFile::default();
+        let (mut app, _mock) = app_with_mock(paths, cfg, pls);
+
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.apply(Action::VolumeUp).unwrap();
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            PlayerCommand::AdjustVolumePercent(100)
+        );
+
+        app.apply(Action::VolumeDown).unwrap();
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            PlayerCommand::AdjustVolumePercent(-100)
         );
     }
 }

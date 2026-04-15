@@ -82,6 +82,20 @@ impl HotkeysEngine {
                 hold: bind.hold.clone(),
             });
         }
+        if let Some(chord) = &b.volume_up {
+            bindings.push(RuntimeBinding {
+                chord: chord.clone(),
+                tap: Action::VolumeUp,
+                hold: None,
+            });
+        }
+        if let Some(chord) = &b.volume_down {
+            bindings.push(RuntimeBinding {
+                chord: chord.clone(),
+                tap: Action::VolumeDown,
+                hold: None,
+            });
+        }
 
         Self {
             timings: cfg.timings.clone(),
@@ -99,7 +113,7 @@ impl HotkeysEngine {
         key: HotkeyKey,
         down_mods: &HashSet<HotkeyModifier>,
     ) -> bool {
-        chord.key == key && chord.modifiers.iter().all(|m| down_mods.contains(m))
+        chord.key == key && modifiers_satisfy(&chord.modifiers, down_mods)
     }
 
     /// Feed a key down/up event. Actions may be emitted on key up (tap),
@@ -239,6 +253,27 @@ fn hold_action_to_action(
             Action::PlayerSeekRelativeSeconds(seconds)
         }
     }
+}
+
+fn modifiers_satisfy(required: &[HotkeyModifier], pressed: &HashSet<HotkeyModifier>) -> bool {
+    required.iter().all(|req| match req {
+        // Generic modifiers can be satisfied by either the generic bit
+        // or a more specific left/right variant (if present in `pressed`).
+        HotkeyModifier::Ctrl => {
+            pressed.contains(&HotkeyModifier::Ctrl) || pressed.contains(&HotkeyModifier::LeftCtrl)
+        }
+        HotkeyModifier::Shift => {
+            pressed.contains(&HotkeyModifier::Shift)
+                || pressed.contains(&HotkeyModifier::LeftShift)
+                || pressed.contains(&HotkeyModifier::RightShift)
+        }
+        // Specific modifiers must match exactly (best-effort validation).
+        HotkeyModifier::LeftCtrl => pressed.contains(&HotkeyModifier::LeftCtrl),
+        HotkeyModifier::LeftShift => pressed.contains(&HotkeyModifier::LeftShift),
+        HotkeyModifier::RightShift => pressed.contains(&HotkeyModifier::RightShift),
+        HotkeyModifier::Alt => pressed.contains(&HotkeyModifier::Alt),
+        HotkeyModifier::Win => pressed.contains(&HotkeyModifier::Win),
+    })
 }
 
 #[cfg(test)]
@@ -396,5 +431,44 @@ mod tests {
             modifiers_down: mods(&[HotkeyModifier::Ctrl]),
         });
         assert!(up.is_empty());
+    }
+
+    #[test]
+    fn chord_matching_allows_generic_ctrl_satisfied_by_left_ctrl() {
+        let chord = HotkeyChord {
+            modifiers: vec![HotkeyModifier::Ctrl],
+            key: HotkeyKey::Space,
+        };
+        let pressed = mods(&[HotkeyModifier::LeftCtrl]);
+        assert!(
+            HotkeysEngine::chord_matches(&chord, HotkeyKey::Space, &pressed),
+            "Ctrl requirement should be satisfied by LeftCtrl"
+        );
+    }
+
+    #[test]
+    fn chord_matching_allows_generic_shift_satisfied_by_right_shift() {
+        let chord = HotkeyChord {
+            modifiers: vec![HotkeyModifier::Shift],
+            key: HotkeyKey::Up,
+        };
+        let pressed = mods(&[HotkeyModifier::RightShift]);
+        assert!(
+            HotkeysEngine::chord_matches(&chord, HotkeyKey::Up, &pressed),
+            "Shift requirement should be satisfied by RightShift"
+        );
+    }
+
+    #[test]
+    fn chord_matching_requires_specific_right_shift_not_satisfied_by_generic_shift() {
+        let chord = HotkeyChord {
+            modifiers: vec![HotkeyModifier::RightShift],
+            key: HotkeyKey::Up,
+        };
+        let pressed = mods(&[HotkeyModifier::Shift]);
+        assert!(
+            !HotkeysEngine::chord_matches(&chord, HotkeyKey::Up, &pressed),
+            "RightShift requirement should not be satisfied by generic Shift alone"
+        );
     }
 }

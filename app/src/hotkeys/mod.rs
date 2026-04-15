@@ -42,8 +42,8 @@ mod windows {
     use ::windows::Win32::System::Threading::GetCurrentThreadId;
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT,
-        MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_DOWN, VK_LEFT, VK_RIGHT, VK_S, VK_SPACE,
-        VK_UP,
+        MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_DOWN, VK_LEFT, VK_NEXT, VK_PRIOR,
+        VK_RIGHT, VK_S, VK_SPACE, VK_UP,
     };
     use ::windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_HOTKEY,
@@ -174,6 +174,24 @@ mod windows {
         }
         if let Some(bind) = &b.prev {
             out.push(reg_next_prev(next_id, false, bind));
+            next_id += 1;
+        }
+        if let Some(chord) = &b.volume_up {
+            out.push(Registration {
+                id: next_id,
+                chord: chord.clone(),
+                kind: BindingKind::TapOnly(Action::VolumeUp),
+                label: "volume_up",
+            });
+            next_id += 1;
+        }
+        if let Some(chord) = &b.volume_down {
+            out.push(Registration {
+                id: next_id,
+                chord: chord.clone(),
+                kind: BindingKind::TapOnly(Action::VolumeDown),
+                label: "volume_down",
+            });
         }
         Ok(out)
     }
@@ -196,6 +214,8 @@ mod windows {
             HotkeyKey::Left => VK_LEFT.0 as u32,
             HotkeyKey::Right => VK_RIGHT.0 as u32,
             HotkeyKey::Space => VK_SPACE.0 as u32,
+            HotkeyKey::PageUp => VK_PRIOR.0 as u32,
+            HotkeyKey::PageDown => VK_NEXT.0 as u32,
             HotkeyKey::S => VK_S.0 as u32,
         }
     }
@@ -204,7 +224,7 @@ mod windows {
         let mut flags = MOD_NOREPEAT.0;
         for m in &chord.modifiers {
             flags |= match m {
-                HotkeyModifier::Ctrl => MOD_CONTROL.0,
+                HotkeyModifier::Ctrl | HotkeyModifier::LeftCtrl => MOD_CONTROL.0,
                 HotkeyModifier::Alt => MOD_ALT.0,
                 HotkeyModifier::Shift | HotkeyModifier::LeftShift | HotkeyModifier::RightShift => {
                     MOD_SHIFT.0
@@ -225,6 +245,10 @@ mod windows {
         let mut out = HashSet::new();
         if vk_is_down(0x11) {
             out.insert(HotkeyModifier::Ctrl);
+        }
+        // VK_LCONTROL
+        if vk_is_down(0xA2) {
+            out.insert(HotkeyModifier::LeftCtrl);
         }
         if vk_is_down(0x12) {
             out.insert(HotkeyModifier::Alt);
@@ -252,6 +276,14 @@ mod windows {
         }
         let mods = snapshot_modifiers();
         chord.modifiers.iter().all(|m| mods.contains(m))
+    }
+
+    fn runtime_chord_matches_snapshot(chord: &HotkeyChord) -> bool {
+        // Best-effort runtime validation for RegisterHotKey backend:
+        // WM_HOTKEY does not distinguish left/right at registration time,
+        // so we re-check the actual key state here using GetAsyncKeyState-derived snapshot.
+        let mods = snapshot_modifiers();
+        HotkeysEngine::chord_matches(chord, chord.key, &mods)
     }
 
     fn run_hotkeys_thread(
@@ -319,6 +351,12 @@ mod windows {
                 if let Some(reg) = registrations.get(&id).cloned() {
                     match reg.kind {
                         BindingKind::TapOnly(action) => {
+                            if !runtime_chord_matches_snapshot(&reg.chord) {
+                                // Ignore spurious WM_HOTKEY where the registered generic modifiers
+                                // (e.g. MOD_CONTROL|MOD_SHIFT) match, but the configured chord
+                                // requires a specific left/right modifier combination.
+                                continue;
+                            }
                             let _ = tx.send(BusMessage::Command(CommandEnvelope {
                                 action,
                                 source: CommandSource::Hotkey,
@@ -413,6 +451,85 @@ mod windows {
                     source: CommandSource::Hotkey,
                 }));
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::config::{
+            HotkeyChord, HotkeyKey, HotkeyModifier, HotkeysBindings, HotkeysConfig,
+        };
+
+        fn cfg_with_bindings(b: HotkeysBindings) -> HotkeysConfig {
+            HotkeysConfig {
+                timings: Default::default(),
+                bindings: b,
+            }
+        }
+
+        fn chord(mods: &[HotkeyModifier], key: HotkeyKey) -> HotkeyChord {
+            HotkeyChord {
+                modifiers: mods.to_vec(),
+                key,
+            }
+        }
+
+        #[test]
+        fn registration_plan_includes_volume_bindings_when_some() {
+            let cfg = cfg_with_bindings(HotkeysBindings {
+                volume_up: Some(chord(
+                    &[HotkeyModifier::LeftCtrl, HotkeyModifier::RightShift],
+                    HotkeyKey::PageUp,
+                )),
+                volume_down: Some(chord(
+                    &[HotkeyModifier::LeftCtrl, HotkeyModifier::RightShift],
+                    HotkeyKey::PageDown,
+                )),
+                ..Default::default()
+            });
+
+            let plan = build_registration_plan(&cfg).expect("plan builds");
+            let labels: std::collections::HashSet<&'static str> =
+                plan.iter().map(|r| r.label).collect();
+
+            assert!(labels.contains("volume_up"));
+            assert!(labels.contains("volume_down"));
+        }
+
+        #[test]
+        fn registration_plan_excludes_volume_bindings_when_none() {
+            let cfg = cfg_with_bindings(HotkeysBindings {
+                volume_up: None,
+                volume_down: None,
+                ..Default::default()
+            });
+
+            let plan = build_registration_plan(&cfg).expect("plan builds");
+            let labels: std::collections::HashSet<&'static str> =
+                plan.iter().map(|r| r.label).collect();
+
+            assert!(!labels.contains("volume_up"));
+            assert!(!labels.contains("volume_down"));
+        }
+
+        #[test]
+        fn registration_plan_can_include_only_one_volume_binding() {
+            let cfg = cfg_with_bindings(HotkeysBindings {
+                volume_up: Some(chord(
+                    &[HotkeyModifier::LeftCtrl, HotkeyModifier::RightShift],
+                    HotkeyKey::PageUp,
+                )),
+                volume_down: None,
+                ..Default::default()
+            });
+
+            let plan = build_registration_plan(&cfg).expect("plan builds");
+            let labels: std::collections::HashSet<&'static str> =
+                plan.iter().map(|r| r.label).collect();
+
+            assert!(labels.contains("volume_up"));
+            assert!(!labels.contains("volume_down"));
         }
     }
 }

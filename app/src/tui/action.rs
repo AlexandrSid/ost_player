@@ -15,6 +15,8 @@ pub enum Action {
     PlayerNext,
     PlayerPrev,
     PlayerSeekRelativeSeconds(i64),
+    VolumeUp,
+    VolumeDown,
 
     // Config mutations
     AddFolder(String),
