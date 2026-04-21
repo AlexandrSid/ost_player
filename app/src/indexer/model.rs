@@ -2,10 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::config::ScanDepth;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderScanEntry {
     pub path: String,
-    pub root_only: bool,
+    pub scan_depth: ScanDepth,
+    pub min_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

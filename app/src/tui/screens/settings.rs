@@ -95,7 +95,6 @@ mod tests {
             data_dir: data_dir.clone(),
             cache_dir: data_dir.join("cache"),
             logs_dir: data_dir.join("logs"),
-            playlists_dir: data_dir.join("playlists"),
             config_path: data_dir.join("config.yaml"),
             playlists_path: data_dir.join("playlists.yaml"),
             state_path: data_dir.join("state.yaml"),

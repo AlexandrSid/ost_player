@@ -13,7 +13,6 @@ fn make_paths_in(base_dir: PathBuf) -> AppPaths {
     let data_dir = base_dir.join("data");
     let cache_dir = data_dir.join("cache");
     let logs_dir = data_dir.join("logs");
-    let playlists_dir = data_dir.join("playlists");
     let config_path = data_dir.join("config.yaml");
     let playlists_path = data_dir.join("playlists.yaml");
     let state_path = data_dir.join("state.yaml");
@@ -22,7 +21,6 @@ fn make_paths_in(base_dir: PathBuf) -> AppPaths {
         data_dir,
         cache_dir,
         logs_dir,
-        playlists_dir,
         config_path,
         playlists_path,
         state_path,
@@ -48,10 +46,6 @@ fn app_paths_resolve_portable_layout_under_data_dir() {
     assert_eq!(paths.cache_dir, expected_base.join("data").join("cache"));
     assert_eq!(paths.logs_dir, expected_base.join("data").join("logs"));
     assert_eq!(
-        paths.playlists_dir,
-        expected_base.join("data").join("playlists")
-    );
-    assert_eq!(
         paths.config_path,
         expected_base.join("data").join("config.yaml")
     );
@@ -72,7 +66,10 @@ fn app_paths_ensure_writable_succeeds_in_temp_dir() {
     paths.ensure_writable().expect("should be writable");
     assert!(paths.cache_dir.is_dir());
     assert!(paths.logs_dir.is_dir());
-    assert!(paths.playlists_dir.is_dir());
+    assert!(
+        !paths.data_dir.join("playlists").exists(),
+        "ensure_writable should not create data/playlists"
+    );
 }
 
 #[test]
@@ -253,6 +250,42 @@ fn config_save_after_min_size_kb_action_serializes_min_size_kb_only() {
             .and_then(|s| s.get("min_size_bytes"))
             .is_none(),
         "config.yaml should not emit legacy settings.min_size_bytes"
+    );
+}
+
+#[test]
+fn config_save_preserves_user_preamble_and_does_not_duplicate_help_header_on_repeat_save() {
+    let dir = tempdir().unwrap();
+    let paths = make_paths_in(dir.path().to_path_buf());
+    fs::create_dir_all(&paths.data_dir).unwrap();
+
+    // Seed an existing config with a user comment preamble and *no* built-in help header.
+    let seeded = r#"# user preamble line 1
+# user preamble line 2
+
+schema_version: 1
+settings:
+  supported_extensions: [mp3, ogg]
+"#;
+    fs::write(&paths.config_path, seeded).unwrap();
+
+    let cfg = config_io::load_or_create(&paths).expect("load should succeed");
+    config_io::save(&paths, &cfg).expect("first save should succeed");
+    config_io::save(&paths, &cfg).expect("second save should succeed");
+
+    let raw = fs::read_to_string(&paths.config_path).unwrap();
+    assert!(
+        raw.starts_with("# ost_player config\n"),
+        "help header marker should be present at top"
+    );
+    assert!(
+        raw.contains("# user preamble line 1\n# user preamble line 2\n"),
+        "user preamble should be preserved"
+    );
+    assert_eq!(
+        raw.matches("# ost_player config").count(),
+        1,
+        "help header should not be duplicated across saves"
     );
 }
 

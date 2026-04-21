@@ -11,7 +11,6 @@ fn make_paths_in(base_dir: PathBuf) -> AppPaths {
     let config_path = data_dir.join("config.yaml");
     let cache_dir = data_dir.join("cache");
     let logs_dir = data_dir.join("logs");
-    let playlists_dir = data_dir.join("playlists");
     let playlists_path = data_dir.join("playlists.yaml");
     let state_path = data_dir.join("state.yaml");
     AppPaths {
@@ -19,7 +18,6 @@ fn make_paths_in(base_dir: PathBuf) -> AppPaths {
         data_dir,
         cache_dir,
         logs_dir,
-        playlists_dir,
         config_path,
         playlists_path,
         state_path,
@@ -39,10 +37,6 @@ fn paths_resolve_uses_current_exe_parent() {
     assert_eq!(paths.data_dir, expected_base.join("data"));
     assert_eq!(paths.cache_dir, expected_base.join("data").join("cache"));
     assert_eq!(paths.logs_dir, expected_base.join("data").join("logs"));
-    assert_eq!(
-        paths.playlists_dir,
-        expected_base.join("data").join("playlists")
-    );
     assert_eq!(
         paths.config_path,
         expected_base.join("data").join("config.yaml")
@@ -66,6 +60,18 @@ fn ensure_data_dirs_creates_logs_dir() {
     assert!(
         paths.logs_dir.is_dir(),
         "logs_dir should exist as directory"
+    );
+}
+
+#[test]
+fn ensure_data_dirs_does_not_create_playlists_subdir() {
+    let dir = tempdir().unwrap();
+    let paths = make_paths_in(dir.path().to_path_buf());
+
+    paths.ensure_data_dirs().expect("should create dirs");
+    assert!(
+        !paths.data_dir.join("playlists").exists(),
+        "data/playlists should not be created"
     );
 }
 

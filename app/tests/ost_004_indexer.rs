@@ -1,3 +1,4 @@
+use ost_player::config::ScanDepth;
 use ost_player::indexer::io as index_io;
 use ost_player::indexer::scan::{scan_library, scan_library_folders};
 use ost_player::indexer::{FolderScanEntry, IndexIssueKind, ScanOptions};
@@ -10,7 +11,6 @@ fn make_paths_in(base_dir: PathBuf) -> AppPaths {
     let data_dir = base_dir.join("data");
     let cache_dir = data_dir.join("cache");
     let logs_dir = data_dir.join("logs");
-    let playlists_dir = data_dir.join("playlists");
     let config_path = data_dir.join("config.yaml");
     let playlists_path = data_dir.join("playlists.yaml");
     let state_path = data_dir.join("state.yaml");
@@ -19,7 +19,6 @@ fn make_paths_in(base_dir: PathBuf) -> AppPaths {
         data_dir,
         cache_dir,
         logs_dir,
-        playlists_dir,
         config_path,
         playlists_path,
         state_path,
@@ -54,12 +53,13 @@ fn scan_root_only_true_indexes_only_root_audio_file() {
     let options = default_scan_options();
     let folders = vec![FolderScanEntry {
         path: root.to_string_lossy().to_string(),
-        root_only: true,
+        scan_depth: ScanDepth::RootOnly,
+        min_size_bytes: options.min_size_bytes,
     }];
     let idx = scan_library_folders(&folders, &options);
 
     assert_eq!(idx.report.issues.len(), 0);
-    assert_eq!(idx.tracks.len(), 1, "root_only=true should not recurse");
+    assert_eq!(idx.tracks.len(), 1, "root-only should not recurse");
     let names = idx
         .tracks
         .iter()
@@ -81,12 +81,13 @@ fn scan_root_only_false_indexes_root_and_nested_audio_files() {
     let options = default_scan_options();
     let folders = vec![FolderScanEntry {
         path: root.to_string_lossy().to_string(),
-        root_only: false,
+        scan_depth: ScanDepth::Recursive,
+        min_size_bytes: options.min_size_bytes,
     }];
     let idx = scan_library_folders(&folders, &options);
 
     assert_eq!(idx.report.issues.len(), 0);
-    assert_eq!(idx.tracks.len(), 2, "root_only=false should recurse");
+    assert_eq!(idx.tracks.len(), 2, "recursive should recurse");
     let names = idx
         .tracks
         .iter()
@@ -94,6 +95,78 @@ fn scan_root_only_false_indexes_root_and_nested_audio_files() {
         .collect::<Vec<_>>();
     assert!(names.iter().any(|n| n.eq_ignore_ascii_case("root.ogg")));
     assert!(names.iter().any(|n| n.eq_ignore_ascii_case("nested.ogg")));
+}
+
+#[test]
+fn scan_respects_per_folder_scan_depth_when_scanning_multiple_folders() {
+    let dir = tempdir().unwrap();
+
+    let root_only = dir.path().join("root_only");
+    fs::create_dir_all(&root_only).unwrap();
+    write_file_of_size(&root_only.join("a.ogg"), 10);
+    write_file_of_size(&root_only.join("sub").join("a_nested.ogg"), 10);
+
+    let one_level = dir.path().join("one_level");
+    fs::create_dir_all(&one_level).unwrap();
+    write_file_of_size(&one_level.join("b.ogg"), 10);
+    write_file_of_size(&one_level.join("sub1").join("b_child.ogg"), 10);
+    write_file_of_size(
+        &one_level.join("sub1").join("sub2").join("b_grandchild.ogg"),
+        10,
+    );
+
+    let recursive = dir.path().join("recursive");
+    fs::create_dir_all(&recursive).unwrap();
+    write_file_of_size(&recursive.join("c.ogg"), 10);
+    write_file_of_size(
+        &recursive.join("sub1").join("sub2").join("c_grandchild.ogg"),
+        10,
+    );
+
+    let options = default_scan_options();
+    let folders = vec![
+        FolderScanEntry {
+            path: root_only.to_string_lossy().to_string(),
+            scan_depth: ScanDepth::RootOnly,
+            min_size_bytes: options.min_size_bytes,
+        },
+        FolderScanEntry {
+            path: one_level.to_string_lossy().to_string(),
+            scan_depth: ScanDepth::OneLevel,
+            min_size_bytes: options.min_size_bytes,
+        },
+        FolderScanEntry {
+            path: recursive.to_string_lossy().to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: options.min_size_bytes,
+        },
+    ];
+    let idx = scan_library_folders(&folders, &options);
+
+    assert_eq!(idx.report.issues.len(), 0);
+
+    let names = idx
+        .tracks
+        .iter()
+        .map(|t| t.path.file_name().unwrap().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    // RootOnly: include top-level only.
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("a.ogg")));
+    assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("a_nested.ogg")));
+
+    // OneLevel: include direct children, exclude deeper.
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("b.ogg")));
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("b_child.ogg")));
+    assert!(!names
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case("b_grandchild.ogg")));
+
+    // Recursive: include deep descendants.
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("c.ogg")));
+    assert!(names
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case("c_grandchild.ogg")));
 }
 
 #[test]
@@ -145,6 +218,57 @@ fn scan_applies_min_size_bytes_filter() {
         "big.mp3"
     );
     assert_eq!(idx.report.skipped_small, 1);
+}
+
+#[test]
+fn scan_respects_per_folder_min_size_bytes_when_scanning_multiple_folders() {
+    let dir = tempdir().unwrap();
+
+    let low = dir.path().join("low_threshold");
+    fs::create_dir_all(&low).unwrap();
+    write_file_of_size(&low.join("small_low.mp3"), 5);
+    write_file_of_size(&low.join("big_low.mp3"), 20);
+
+    let high = dir.path().join("high_threshold");
+    fs::create_dir_all(&high).unwrap();
+    write_file_of_size(&high.join("small_high.mp3"), 5);
+    write_file_of_size(&high.join("big_high.mp3"), 20);
+
+    let mut options = default_scan_options();
+    options.min_size_bytes = 0;
+
+    let folders = vec![
+        FolderScanEntry {
+            path: low.to_string_lossy().to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 0,
+        },
+        FolderScanEntry {
+            path: high.to_string_lossy().to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 10,
+        },
+    ];
+    let idx = scan_library_folders(&folders, &options);
+    assert_eq!(idx.report.issues.len(), 0);
+
+    let names = idx
+        .tracks
+        .iter()
+        .map(|t| t.path.file_name().unwrap().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    // Low-threshold folder: includes both.
+    assert!(names
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case("small_low.mp3")));
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("big_low.mp3")));
+
+    // High-threshold folder: filters the small track.
+    assert!(!names
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case("small_high.mp3")));
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("big_high.mp3")));
 }
 
 #[test]

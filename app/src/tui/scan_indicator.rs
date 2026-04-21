@@ -1,16 +1,19 @@
 use unicode_width::UnicodeWidthStr;
 
+use crate::config::ScanDepth;
+
 const INDICATOR_RECURSIVE: &str = ">>>";
 const INDICATOR_ROOT_ONLY: &str = ">|⋮";
+const INDICATOR_ONE_LEVEL: &str = ">⋮|";
 
 // Must stay stable to avoid column jitter in folder lists.
 const INDICATOR_TARGET_WIDTH: usize = 3;
 
-pub fn scan_mode_indicator(root_only: bool) -> &'static str {
-    if root_only {
-        INDICATOR_ROOT_ONLY
-    } else {
-        INDICATOR_RECURSIVE
+pub fn scan_mode_indicator(depth: ScanDepth) -> &'static str {
+    match depth {
+        ScanDepth::RootOnly => INDICATOR_ROOT_ONLY,
+        ScanDepth::OneLevel => INDICATOR_ONE_LEVEL,
+        ScanDepth::Recursive => INDICATOR_RECURSIVE,
     }
 }
 
@@ -30,12 +33,8 @@ fn fixed_width_indicator(sym: &str) -> String {
     }
 }
 
-/// Returns a fixed-width scan indicator string for stable alignment.
-///
-/// Uses display-width padding (not byte-length padding) to handle Unicode.
-pub fn scan_mode_indicator_fixed(root_only: bool) -> String {
-    let sym = scan_mode_indicator(root_only);
-    fixed_width_indicator(sym)
+pub fn scan_depth_indicator_fixed(depth: ScanDepth) -> String {
+    fixed_width_indicator(scan_mode_indicator(depth))
 }
 
 #[cfg(test)]
@@ -45,39 +44,52 @@ mod tests {
 
     #[test]
     fn scan_mode_indicator_maps_root_only_to_expected_symbol() {
-        assert_eq!(scan_mode_indicator(true), ">|⋮");
+        assert_eq!(scan_mode_indicator(ScanDepth::RootOnly), ">|⋮");
+    }
+
+    #[test]
+    fn scan_mode_indicator_maps_one_level_to_expected_symbol() {
+        assert_eq!(scan_mode_indicator(ScanDepth::OneLevel), ">⋮|");
     }
 
     #[test]
     fn scan_mode_indicator_maps_recursive_to_expected_symbol() {
-        assert_eq!(scan_mode_indicator(false), ">>>");
+        assert_eq!(scan_mode_indicator(ScanDepth::Recursive), ">>>");
     }
 
     #[test]
     fn scan_mode_indicator_fixed_is_stable_display_width_three() {
-        for root_only in [true, false] {
-            let fixed = scan_mode_indicator_fixed(root_only);
+        for depth in [
+            ScanDepth::RootOnly,
+            ScanDepth::OneLevel,
+            ScanDepth::Recursive,
+        ] {
+            let fixed = scan_depth_indicator_fixed(depth);
             assert_eq!(
                 UnicodeWidthStr::width(fixed.as_str()),
                 3,
-                "indicator must be fixed display-width=3 (root_only={root_only})"
+                "indicator must be fixed display-width=3 (depth={depth:?})"
             );
         }
     }
 
     #[test]
     fn scan_mode_indicator_fixed_starts_with_raw_symbol_and_only_adds_spaces() {
-        for root_only in [true, false] {
-            let raw = scan_mode_indicator(root_only);
-            let fixed = scan_mode_indicator_fixed(root_only);
+        for depth in [
+            ScanDepth::RootOnly,
+            ScanDepth::OneLevel,
+            ScanDepth::Recursive,
+        ] {
+            let raw = scan_mode_indicator(depth);
+            let fixed = scan_depth_indicator_fixed(depth);
             assert!(
                 fixed.starts_with(raw),
-                "fixed indicator must start with raw symbol (root_only={root_only})"
+                "fixed indicator must start with raw symbol (depth={depth:?})"
             );
             let suffix = &fixed[raw.len()..];
             assert!(
                 suffix.chars().all(|c| c == ' '),
-                "fixed indicator may only add spaces (root_only={root_only})"
+                "fixed indicator may only add spaces (depth={depth:?})"
             );
         }
     }

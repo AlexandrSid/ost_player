@@ -6,6 +6,64 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanDepth {
+    /// Scan only the folder root (depth = 0).
+    #[default]
+    RootOnly,
+    /// Scan folder root + one nested level (depth = 1).
+    OneLevel,
+    /// Scan recursively without a depth limit (depth = ∞).
+    Recursive,
+}
+
+impl ScanDepth {
+    pub fn cycle_next(self) -> Self {
+        match self {
+            Self::RootOnly => Self::OneLevel,
+            Self::OneLevel => Self::Recursive,
+            Self::Recursive => Self::RootOnly,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LoggingLevel {
+    /// Opinionated defaults: include domain config-changing events; suppress noisy deps; exclude
+    /// playback chatter.
+    #[default]
+    Default,
+    Debug,
+    Trace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Logging detail preset.
+    #[serde(default)]
+    pub default_level: LoggingLevel,
+
+    /// Delete log files older than this many days on startup.
+    #[serde(default = "defaults::default_logging_retention_days")]
+    pub retention_days: u64,
+
+    /// Preserve unknown `logging.*` fields for forward compatibility.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            default_level: LoggingLevel::Default,
+            retention_days: defaults::default_logging_retention_days(),
+            extra: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RepeatMode {
@@ -24,6 +82,16 @@ pub struct SettingsConfig {
 
     /// Derived value for existing call sites; not persisted.
     pub min_size_bytes: u64,
+
+    /// Per-folder custom min_size_kb lower bound (inclusive). Values outside the range are ignored.
+    ///
+    /// Persisted as `settings.min_size_custom_kb_min`.
+    pub min_size_custom_kb_min: u32,
+
+    /// Per-folder custom min_size_kb upper bound (inclusive). Values outside the range are ignored.
+    ///
+    /// Persisted as `settings.min_size_custom_kb_max`.
+    pub min_size_custom_kb_max: u32,
 
     pub shuffle: bool,
 
@@ -48,6 +116,12 @@ struct SettingsConfigDe {
     shuffle: bool,
 
     #[serde(default)]
+    min_size_custom_kb_min: Option<u32>,
+
+    #[serde(default)]
+    min_size_custom_kb_max: Option<u32>,
+
+    #[serde(default)]
     repeat: RepeatMode,
 
     #[serde(default = "defaults::default_supported_extensions")]
@@ -61,6 +135,8 @@ struct SettingsConfigDe {
 #[derive(Debug, Clone, Serialize)]
 struct SettingsConfigSer<'a> {
     min_size_kb: u64,
+    min_size_custom_kb_min: u32,
+    min_size_custom_kb_max: u32,
     shuffle: bool,
     repeat: RepeatMode,
     supported_extensions: &'a Vec<String>,
@@ -92,9 +168,18 @@ impl<'de> Deserialize<'de> for SettingsConfig {
             .checked_mul(1024)
             .ok_or_else(|| <D::Error as de::Error>::custom("settings.min_size_kb is too large"))?;
 
+        let min_size_custom_kb_min = v
+            .min_size_custom_kb_min
+            .unwrap_or_else(defaults::default_min_size_custom_kb_min);
+        let min_size_custom_kb_max = v
+            .min_size_custom_kb_max
+            .unwrap_or_else(defaults::default_min_size_custom_kb_max);
+
         Ok(Self {
             min_size_kb,
             min_size_bytes,
+            min_size_custom_kb_min,
+            min_size_custom_kb_max,
             shuffle: v.shuffle,
             repeat: v.repeat,
             supported_extensions: v.supported_extensions,
@@ -111,6 +196,8 @@ impl Serialize for SettingsConfig {
         // Migration-on-save: write `min_size_kb` only (legacy `min_size_bytes` omitted).
         SettingsConfigSer {
             min_size_kb: self.min_size_kb,
+            min_size_custom_kb_min: self.min_size_custom_kb_min,
+            min_size_custom_kb_max: self.min_size_custom_kb_max,
             shuffle: self.shuffle,
             repeat: self.repeat,
             supported_extensions: &self.supported_extensions,
@@ -192,25 +279,124 @@ pub struct HotkeyChord {
     pub key: HotkeyKey,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AudioConfig {
     /// Initial volume for the current app session, in percent (0..=100).
-    #[serde(default = "defaults::default_volume_default_percent")]
-    pub default_volume_percent: u8,
+    ///
+    /// Persisted as `audio.volume_default_percent`.
+    pub volume_default_percent: u8,
 
-    /// Amount to change volume per hotkey press, in percent (1..=100).
-    #[serde(default = "defaults::default_volume_step_percent")]
-    pub volume_step_percent: u8,
+    /// Discrete volume ladder in percent (0..=100), sorted and unique.
+    ///
+    /// Persisted as `audio.volume_available_percent`.
+    pub volume_available_percent: Vec<u8>,
+
+    /// Preserve unknown `audio.*` fields for forward compatibility.
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AudioConfigDe {
+    /// New field.
+    #[serde(default)]
+    volume_default_percent: Option<u8>,
+
+    /// Legacy field, supported for read-compat only.
+    #[serde(default)]
+    default_volume_percent: Option<u8>,
+
+    /// New field.
+    #[serde(default)]
+    volume_available_percent: Option<Vec<u8>>,
+
+    /// Legacy field, supported for read-compat only.
+    #[serde(default)]
+    volume_step_percent: Option<u8>,
 
     /// Preserve unknown `audio.*` fields for forward compatibility.
     #[serde(flatten, default)]
-    pub extra: BTreeMap<String, Value>,
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AudioConfigSer<'a> {
+    volume_default_percent: u8,
+    volume_available_percent: &'a Vec<u8>,
+
+    /// Preserve unknown `audio.*` fields for forward compatibility.
+    #[serde(flatten)]
+    extra: &'a BTreeMap<String, Value>,
+}
+
+impl<'de> Deserialize<'de> for AudioConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let v = Option::<AudioConfigDe>::deserialize(deserializer)?;
+        let v = match v {
+            None => return Ok(Self::default()),
+            Some(v) => v,
+        };
+
+        // Alias/migration: prefer the new name, fall back to the legacy one.
+        let volume_default_percent = v
+            .volume_default_percent
+            .or(v.default_volume_percent)
+            .unwrap_or_else(defaults::default_volume_default_percent);
+
+        // Migration: if the new list is missing, but legacy step exists, generate
+        // [0, step, 2*step, ... 100].
+        let volume_available_percent = if let Some(list) = v.volume_available_percent {
+            list
+        } else if let Some(step) = v.volume_step_percent {
+            volume_available_from_step(step)
+        } else {
+            defaults::default_volume_available_percent()
+        };
+
+        Ok(Self {
+            volume_default_percent,
+            volume_available_percent,
+            extra: v.extra,
+        })
+    }
+}
+
+impl Serialize for AudioConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Migration-on-save: write new fields only (legacy names omitted).
+        AudioConfigSer {
+            volume_default_percent: self.volume_default_percent,
+            volume_available_percent: &self.volume_available_percent,
+            extra: &self.extra,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl Default for AudioConfig {
     fn default() -> Self {
         defaults::default_audio()
     }
+}
+
+fn volume_available_from_step(step: u8) -> Vec<u8> {
+    // Be forgiving during migration; validation will reject bad values later.
+    let step = step.max(1);
+    let mut out = Vec::new();
+    let mut cur: u8 = 0;
+    loop {
+        out.push(cur);
+        if cur == 100 {
+            break;
+        }
+        cur = cur.saturating_add(step).min(100);
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +486,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub audio: AudioConfig,
 
+    #[serde(default)]
+    pub logging: LoggingConfig,
+
     /// Preserve unknown top-level fields when reading/writing.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -317,6 +506,13 @@ impl AppConfig {
 
         if self.settings.min_size_kb.checked_mul(1024).is_none() {
             return Err("settings.min_size_kb is too large".to_string());
+        }
+
+        if self.settings.min_size_custom_kb_min > self.settings.min_size_custom_kb_max {
+            return Err(
+                "settings.min_size_custom_kb_min must be <= settings.min_size_custom_kb_max"
+                    .to_string(),
+            );
         }
 
         // Hotkeys timings: non-zero and within sane bounds to avoid hangs/spins.
@@ -343,11 +539,42 @@ impl AppConfig {
         }
 
         // Audio: basic ranges.
-        if self.audio.default_volume_percent > 100 {
-            return Err("audio.default_volume_percent must be within 0..=100".to_string());
+        if self.audio.volume_default_percent > 100 {
+            return Err("audio.volume_default_percent must be within 0..=100".to_string());
         }
-        if self.audio.volume_step_percent == 0 || self.audio.volume_step_percent > 100 {
-            return Err("audio.volume_step_percent must be within 1..=100".to_string());
+
+        if self.audio.volume_available_percent.is_empty() {
+            return Err("audio.volume_available_percent must not be empty".to_string());
+        }
+
+        // Must be sorted, unique, include 0 and 100, and each element within 0..=100.
+        let mut prev: Option<u8> = None;
+        let mut has_0 = false;
+        let mut has_100 = false;
+        for &p in &self.audio.volume_available_percent {
+            if p > 100 {
+                return Err(
+                    "audio.volume_available_percent values must be within 0..=100".to_string(),
+                );
+            }
+            if p == 0 {
+                has_0 = true;
+            }
+            if p == 100 {
+                has_100 = true;
+            }
+            if let Some(prev) = prev {
+                if p <= prev {
+                    return Err(
+                        "audio.volume_available_percent must be unique and sorted ascending"
+                            .to_string(),
+                    );
+                }
+            }
+            prev = Some(p);
+        }
+        if !has_0 || !has_100 {
+            return Err("audio.volume_available_percent must include 0 and 100".to_string());
         }
 
         Ok(())
@@ -355,8 +582,17 @@ impl AppConfig {
 
     pub fn normalized(mut self) -> Self {
         self.folders = dedup_keep_order_folders(self.folders);
+        self.folders = normalize_custom_min_size_keep_invalid_as_none(
+            self.folders,
+            self.settings.min_size_custom_kb_min,
+            self.settings.min_size_custom_kb_max,
+        );
         self.settings.supported_extensions =
             dedup_keep_order(self.settings.supported_extensions.clone());
+        // Keep the audio ladder stable even if user provided duplicates/out-of-order;
+        // validation is strict, but normalization is cheap and helps call sites.
+        self.audio.volume_available_percent.sort_unstable();
+        self.audio.volume_available_percent.dedup();
         self
     }
 
@@ -373,34 +609,130 @@ impl Default for AppConfig {
             folders: Vec::new(),
             hotkeys: HotkeysConfig::default(),
             audio: AudioConfig::default(),
+            logging: LoggingConfig::default(),
             extra: BTreeMap::new(),
         }
     }
 }
 
-fn default_root_only() -> bool {
-    true
+fn default_scan_depth() -> ScanDepth {
+    ScanDepth::RootOnly
 }
 
-fn is_true(v: &bool) -> bool {
-    *v
+fn is_default_scan_depth(v: &ScanDepth) -> bool {
+    *v == default_scan_depth()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderEntry {
     pub path: String,
-
-    #[serde(default = "default_root_only", skip_serializing_if = "is_true")]
-    pub root_only: bool,
+    pub scan_depth: ScanDepth,
+    pub custom_min_size_kb: Option<u32>,
 }
 
 impl FolderEntry {
     pub fn new(path: String) -> Self {
         Self {
             path,
-            root_only: default_root_only(),
+            scan_depth: default_scan_depth(),
+            custom_min_size_kb: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FolderEntryDe {
+    path: String,
+
+    /// Legacy field, supported for read-compat only.
+    #[serde(default)]
+    root_only: Option<bool>,
+
+    #[serde(default)]
+    scan_depth: Option<ScanDepth>,
+
+    #[serde(default)]
+    custom_min_size_kb: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FolderEntrySer<'a> {
+    path: &'a str,
+
+    #[serde(skip_serializing_if = "is_default_scan_depth")]
+    scan_depth: ScanDepth,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    custom_min_size_kb: Option<u32>,
+}
+
+impl<'de> Deserialize<'de> for FolderEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let v = FolderEntryDe::deserialize(deserializer)?;
+
+        // Precedence: new enum wins when both are present.
+        let scan_depth = if let Some(d) = v.scan_depth {
+            d
+        } else if let Some(root_only) = v.root_only {
+            if root_only {
+                ScanDepth::RootOnly
+            } else {
+                ScanDepth::Recursive
+            }
+        } else {
+            default_scan_depth()
+        };
+
+        Ok(Self {
+            path: v.path,
+            scan_depth,
+            custom_min_size_kb: v.custom_min_size_kb,
+        })
+    }
+}
+
+impl Serialize for FolderEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Migration-on-save: write `scan_depth` only (legacy `root_only` omitted).
+        FolderEntrySer {
+            path: self.path.as_str(),
+            scan_depth: self.scan_depth,
+            custom_min_size_kb: self.custom_min_size_kb,
+        }
+        .serialize(serializer)
+    }
+}
+
+fn normalize_custom_min_size_keep_invalid_as_none(
+    mut folders: Vec<FolderEntry>,
+    min_kb: u32,
+    max_kb: u32,
+) -> Vec<FolderEntry> {
+    for f in &mut folders {
+        if let Some(v) = f.custom_min_size_kb {
+            if !(min_kb..=max_kb).contains(&v) {
+                f.custom_min_size_kb = None;
+            }
+        }
+    }
+    folders
+}
+
+pub fn effective_min_size_kb_for_folder(folder: &FolderEntry, settings: &SettingsConfig) -> u64 {
+    let min_kb = settings.min_size_custom_kb_min;
+    let max_kb = settings.min_size_custom_kb_max;
+    if let Some(v) = folder.custom_min_size_kb {
+        if (min_kb..=max_kb).contains(&v) {
+            return v as u64;
+        }
+    }
+    settings.min_size_kb
 }
 
 fn dedup_keep_order(mut items: Vec<String>) -> Vec<String> {
@@ -439,7 +771,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_yaml_folders_vec_string_deserializes_into_folder_entries_root_only_true() {
+    fn scan_depth_cycle_next_cycles_root_only_one_level_recursive_root_only() {
+        let a = ScanDepth::RootOnly;
+        let b = a.cycle_next();
+        let c = b.cycle_next();
+        let d = c.cycle_next();
+        assert_eq!(b, ScanDepth::OneLevel);
+        assert_eq!(c, ScanDepth::Recursive);
+        assert_eq!(d, ScanDepth::RootOnly);
+    }
+
+    #[test]
+    fn legacy_yaml_folders_vec_string_deserializes_into_folder_entries_scan_depth_root_only() {
         let raw = r#"
 schema_version: 1
 folders: ["C:\\Music", "D:\\OST"]
@@ -453,23 +796,25 @@ settings:
             vec![
                 FolderEntry {
                     path: "C:\\Music".to_string(),
-                    root_only: true,
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 },
                 FolderEntry {
                     path: "D:\\OST".to_string(),
-                    root_only: true,
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 }
             ]
         );
     }
 
     #[test]
-    fn new_yaml_folders_object_form_deserializes_and_root_only_defaults_true_when_omitted() {
+    fn new_yaml_folders_object_form_deserializes_and_scan_depth_defaults_root_only_when_omitted() {
         let raw = r#"
 schema_version: 1
 folders:
   - path: "C:\\Music"
-    root_only: false
+    scan_depth: recursive
   - path: "D:\\OST"
 settings:
   supported_extensions: [mp3]
@@ -481,11 +826,13 @@ settings:
             vec![
                 FolderEntry {
                     path: "C:\\Music".to_string(),
-                    root_only: false,
+                    scan_depth: ScanDepth::Recursive,
+                    custom_min_size_kb: None,
                 },
                 FolderEntry {
                     path: "D:\\OST".to_string(),
-                    root_only: true,
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 }
             ]
         );
@@ -497,19 +844,23 @@ settings:
             folders: vec![
                 FolderEntry {
                     path: "C:\\Music".to_string(),
-                    root_only: false,
+                    scan_depth: ScanDepth::Recursive,
+                    custom_min_size_kb: None,
                 },
                 FolderEntry {
                     path: "C:\\Music".to_string(),
-                    root_only: true,
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 },
                 FolderEntry {
                     path: "D:\\OST".to_string(),
-                    root_only: true,
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 },
                 FolderEntry {
                     path: "C:\\Music".to_string(),
-                    root_only: false,
+                    scan_depth: ScanDepth::Recursive,
+                    custom_min_size_kb: None,
                 },
             ],
             ..Default::default()
@@ -521,24 +872,70 @@ settings:
             vec![
                 FolderEntry {
                     path: "C:\\Music".to_string(),
-                    root_only: false,
+                    scan_depth: ScanDepth::Recursive,
+                    custom_min_size_kb: None,
                 },
                 FolderEntry {
                     path: "D:\\OST".to_string(),
-                    root_only: true,
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 },
             ]
         );
     }
 
     #[test]
-    fn folder_entry_serialization_skips_root_only_true() {
+    fn folder_entry_serialization_skips_default_scan_depth() {
         let entry = FolderEntry {
             path: "C:\\Music".to_string(),
-            root_only: true,
+            scan_depth: ScanDepth::RootOnly,
+            custom_min_size_kb: None,
         };
         let y = serde_yaml::to_string(&entry).unwrap();
-        assert!(!y.contains("root_only: true"));
+        assert!(!y.contains("scan_depth"));
+    }
+
+    #[test]
+    fn folder_entry_legacy_root_only_bool_deserializes_into_scan_depth() {
+        let raw = r#"
+path: "C:\\Music"
+root_only: false
+"#;
+        let entry: FolderEntry = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(entry.scan_depth, ScanDepth::Recursive);
+    }
+
+    #[test]
+    fn folder_entry_legacy_root_only_true_deserializes_into_root_only_scan_depth() {
+        let raw = r#"
+path: "C:\\Music"
+root_only: true
+"#;
+        let entry: FolderEntry = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(entry.scan_depth, ScanDepth::RootOnly);
+    }
+
+    #[test]
+    fn folder_entry_deserialization_prefers_scan_depth_over_legacy_root_only_when_both_present() {
+        let raw = r#"
+path: "C:\\Music"
+root_only: true
+scan_depth: recursive
+"#;
+        let entry: FolderEntry = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(entry.scan_depth, ScanDepth::Recursive);
+    }
+
+    #[test]
+    fn folder_entry_serialization_includes_non_default_scan_depth() {
+        let entry = FolderEntry {
+            path: "C:\\Music".to_string(),
+            scan_depth: ScanDepth::OneLevel,
+            custom_min_size_kb: None,
+        };
+        let y = serde_yaml::to_string(&entry).unwrap();
+        assert!(y.contains("scan_depth"));
+        assert!(y.contains("one_level"));
     }
 
     #[test]
@@ -554,5 +951,81 @@ settings:
         let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
         assert_eq!(cfg.settings.min_size_kb, 2);
         assert_eq!(cfg.settings.min_size_bytes, 2 * 1024);
+    }
+
+    #[test]
+    fn audio_legacy_default_volume_percent_deserializes_into_volume_default_percent() {
+        let raw = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3]
+audio:
+  default_volume_percent: 42
+  volume_available_percent: [0, 50, 100]
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(cfg.audio.volume_default_percent, 42);
+    }
+
+    #[test]
+    fn audio_volume_step_percent_migrates_into_volume_available_percent_when_list_missing() {
+        let raw = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3]
+audio:
+  volume_step_percent: 30
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(cfg.audio.volume_available_percent, vec![0, 30, 60, 90, 100]);
+    }
+
+    #[test]
+    fn audio_volume_available_percent_validation_requires_sorted_unique_and_bounds() {
+        let cfg = AppConfig {
+            audio: AudioConfig {
+                volume_default_percent: 50,
+                volume_available_percent: vec![0, 10, 10, 100],
+                extra: Default::default(),
+            },
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn normalized_clears_out_of_range_folder_custom_min_size_kb() {
+        let cfg = AppConfig {
+            settings: SettingsConfig {
+                min_size_kb: 100,
+                min_size_bytes: 100 * 1024,
+                min_size_custom_kb_min: 10,
+                min_size_custom_kb_max: 10_000,
+                ..Default::default()
+            },
+            folders: vec![
+                FolderEntry {
+                    path: "C:\\TooSmall".to_string(),
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: Some(9),
+                },
+                FolderEntry {
+                    path: "C:\\Ok".to_string(),
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: Some(222),
+                },
+                FolderEntry {
+                    path: "C:\\TooBig".to_string(),
+                    scan_depth: ScanDepth::RootOnly,
+                    custom_min_size_kb: Some(10_001),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let normalized = cfg.normalized();
+        assert_eq!(normalized.folders[0].custom_min_size_kb, None);
+        assert_eq!(normalized.folders[1].custom_min_size_kb, Some(222));
+        assert_eq!(normalized.folders[2].custom_min_size_kb, None);
     }
 }

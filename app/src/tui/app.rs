@@ -1,4 +1,4 @@
-use crate::config::{self, FolderEntry, RepeatMode};
+use crate::config::{self, effective_min_size_kb_for_folder, FolderEntry, RepeatMode, ScanDepth};
 use crate::error::{AppError, AppResult};
 use crate::indexer::{self, FolderScanEntry, ScanOptions};
 use crate::player::{PlayerCommand, PlayerEvent, PlayerHandle};
@@ -142,7 +142,7 @@ impl TuiApp {
         let player = PlayerHandle::spawn(
             cfg.settings.shuffle,
             cfg.settings.repeat,
-            cfg.audio.default_volume_percent,
+            cfg.audio.volume_default_percent,
         );
         let mut state = AppState::new(paths, cfg, pls, cached);
         state.player.shuffle = state.cfg.settings.shuffle;
@@ -222,6 +222,11 @@ impl TuiApp {
             }
             Action::SetStatus(msg) => self.state.status = Some(msg),
             Action::ClearStatus => self.state.status = None,
+            Action::PlayerSetUiActivity { focused, minimized } => {
+                if let Some(p) = self.player.as_ref() {
+                    p.send(PlayerCommand::SetUiActivity { focused, minimized });
+                }
+            }
             Action::SelectFolderDelta(delta) => {
                 let len = self.state.cfg.folders.len();
                 if len == 0 {
@@ -256,12 +261,14 @@ impl TuiApp {
                 self.state.cfg = self.state.cfg.clone().normalized();
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
+                tracing::info!(path = %trimmed, "folder added");
                 self.state.status = Some("folder added and saved".to_string());
             }
             Action::RemoveFolderAt(idx) => {
                 if idx >= self.state.cfg.folders.len() {
                     return Ok(());
                 }
+                let removed = self.state.cfg.folders[idx].path.clone();
                 self.state.cfg.folders.remove(idx);
                 self.state.cfg = self.state.cfg.clone().normalized();
                 self.persistence
@@ -270,19 +277,73 @@ impl TuiApp {
                     self.state.main_selected_folder =
                         self.state.cfg.folders.len().saturating_sub(1);
                 }
+                tracing::info!(path = %removed, "folder removed");
                 self.state.status = Some("folder removed and saved".to_string());
             }
             Action::ToggleFolderRootOnlyAt(idx) => {
-                let Some(folder) = self.state.cfg.folders.get_mut(idx) else {
-                    return Ok(());
+                let (path, new_depth) = {
+                    let Some(folder) = self.state.cfg.folders.get_mut(idx) else {
+                        return Ok(());
+                    };
+                    let new_depth = folder.scan_depth.cycle_next();
+                    folder.scan_depth = new_depth;
+                    (folder.path.clone(), new_depth)
                 };
-                let new_value = !folder.root_only;
-                folder.root_only = new_value;
                 self.state.cfg = self.state.cfg.clone().normalized();
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
-                let label = if new_value { "on" } else { "off" };
-                self.state.status = Some(format!("root_only toggled: {label}"));
+                let label = match new_depth {
+                    ScanDepth::RootOnly => "root-only",
+                    ScanDepth::OneLevel => "one-level",
+                    ScanDepth::Recursive => "recursive",
+                };
+                tracing::info!(path = %path, scan_depth = ?new_depth, "folder setting changed");
+                self.state.status = Some(format!("scan depth: {label}"));
+            }
+            Action::SetFolderCustomMinSizeKb { idx, custom_kb } => {
+                let (min, max) = (
+                    self.state.cfg.settings.min_size_custom_kb_min,
+                    self.state.cfg.settings.min_size_custom_kb_max,
+                );
+
+                let (applied, path, next_val) = {
+                    let Some(folder) = self.state.cfg.folders.get_mut(idx) else {
+                        return Ok(());
+                    };
+                    let applied = match custom_kb {
+                        None => {
+                            folder.custom_min_size_kb = None;
+                            true
+                        }
+                        Some(v) => {
+                            if (min..=max).contains(&v) {
+                                folder.custom_min_size_kb = Some(v);
+                                true
+                            } else {
+                                // Ignore out-of-range values (keep existing value unchanged).
+                                false
+                            }
+                        }
+                    };
+                    (applied, folder.path.clone(), folder.custom_min_size_kb)
+                };
+
+                if !applied {
+                    self.state.status = Some(format!(
+                        "ignored: custom min_size_kb must be within {min}..={max}"
+                    ));
+                    return Ok(());
+                }
+
+                self.state.cfg = self.state.cfg.clone().normalized();
+                self.persistence
+                    .save_config(&self.state.paths, &self.state.cfg)?;
+                tracing::info!(
+                    path = %path,
+                    custom_min_size_kb = ?next_val,
+                    "folder setting changed"
+                );
+                self.state.status = Some("settings saved".to_string());
             }
             Action::SetMinSizeKb(v) => {
                 let bytes = match v.checked_mul(1024) {
@@ -296,12 +357,14 @@ impl TuiApp {
                 self.state.cfg.settings.min_size_bytes = bytes;
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
+                tracing::info!(min_size_kb = v, "setting changed");
                 self.state.status = Some("settings saved".to_string());
             }
             Action::ToggleShuffle => {
                 self.state.cfg.settings.shuffle = !self.state.cfg.settings.shuffle;
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
+                tracing::info!(shuffle = self.state.cfg.settings.shuffle, "setting changed");
                 self.state.status = Some("settings saved".to_string());
                 if let Some(p) = self.player.as_ref() {
                     p.send(PlayerCommand::SetShuffle(self.state.cfg.settings.shuffle));
@@ -315,6 +378,7 @@ impl TuiApp {
                 };
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
+                tracing::info!(repeat = ?self.state.cfg.settings.repeat, "setting changed");
                 self.state.status = Some("settings saved".to_string());
                 if let Some(p) = self.player.as_ref() {
                     p.send(PlayerCommand::SetRepeat(self.state.cfg.settings.repeat));
@@ -369,15 +433,19 @@ impl TuiApp {
                 }
             }
             Action::VolumeUp => {
-                let step = self.state.cfg.audio.volume_step_percent.min(100) as i8;
                 if let Some(p) = self.player.as_ref() {
-                    p.send(PlayerCommand::AdjustVolumePercent(step));
+                    let cur = self.state.player.volume_percent;
+                    let next =
+                        next_volume_percent(&self.state.cfg.audio.volume_available_percent, cur);
+                    p.send(PlayerCommand::SetVolumePercent(next));
                 }
             }
             Action::VolumeDown => {
-                let step = self.state.cfg.audio.volume_step_percent.min(100) as i8;
                 if let Some(p) = self.player.as_ref() {
-                    p.send(PlayerCommand::AdjustVolumePercent(-step));
+                    let cur = self.state.player.volume_percent;
+                    let prev =
+                        prev_volume_percent(&self.state.cfg.audio.volume_available_percent, cur);
+                    p.send(PlayerCommand::SetVolumePercent(prev));
                 }
             }
 
@@ -410,6 +478,7 @@ impl TuiApp {
                 self.state.playlists.playlists.push(p);
                 self.persistence
                     .save_playlists(&self.state.paths, &self.state.playlists)?;
+                tracing::info!(playlist_name = %name, "playlist created");
                 self.state.status = Some("playlist created and saved".to_string());
             }
             Action::RenamePlaylist { idx, name } => {
@@ -419,11 +488,13 @@ impl TuiApp {
                     return Ok(());
                 }
                 if let Some(p) = self.state.playlists.playlists.get_mut(idx) {
+                    let old = p.name.clone();
                     p.name = name.to_string();
                     p.validate()
                         .map_err(|msg| AppError::Config { message: msg })?;
                     self.persistence
                         .save_playlists(&self.state.paths, &self.state.playlists)?;
+                    tracing::info!(from = %old, to = %name, "playlist renamed");
                     self.state.status = Some("playlist renamed and saved".to_string());
                 }
             }
@@ -432,12 +503,14 @@ impl TuiApp {
                     return Ok(());
                 }
                 let deleted_id = self.state.playlists.playlists[idx].id.clone();
+                let deleted_name = self.state.playlists.playlists[idx].name.clone();
                 self.state.playlists.playlists.remove(idx);
                 if self.state.playlists.active.as_deref() == Some(deleted_id.as_str()) {
                     self.state.playlists.active = None;
                 }
                 self.persistence
                     .save_playlists(&self.state.paths, &self.state.playlists)?;
+                tracing::info!(playlist_id = %deleted_id, playlist_name = %deleted_name, "playlist deleted");
                 self.state.status = Some("playlist deleted and saved".to_string());
                 if self.state.playlists_selected >= self.state.playlists.playlists.len() {
                     self.state.playlists_selected =
@@ -445,15 +518,34 @@ impl TuiApp {
                 }
             }
             Action::OverwritePlaylistWithCurrent { idx } => {
-                if let Some(p) = self.state.playlists.playlists.get_mut(idx) {
-                    p.folders = self.state.cfg.folders.clone();
-                    self.persistence
-                        .save_playlists(&self.state.paths, &self.state.playlists)?;
-                    self.state.status = Some("playlist overwritten and saved".to_string());
-                }
+                let Some(p) = self.state.playlists.playlists.get_mut(idx) else {
+                    return Ok(());
+                };
+                p.folders = self.state.cfg.folders.clone();
+                let (playlist_id, playlist_name) = (p.id.clone(), p.name.clone());
+                let _ = p; // end mutable borrow before immutable borrow below
+                self.persistence
+                    .save_playlists(&self.state.paths, &self.state.playlists)?;
+                tracing::info!(playlist_id = %playlist_id, playlist_name = %playlist_name, "playlist overwritten");
+                self.state.status = Some("playlist overwritten and saved".to_string());
             }
             Action::LoadPlaylist { idx } => {
                 if let Some(p) = self.state.playlists.playlists.get(idx) {
+                    let requested_is_active =
+                        self.state.playlists.active.as_deref() == Some(p.id.as_str());
+                    let is_playing_or_paused =
+                        self.state.player.status != crate::player::PlaybackStatus::Stopped;
+                    let folders_match_active =
+                        normalize_folders(&self.state.cfg.folders) == normalize_folders(&p.folders);
+
+                    // Guard: if the user selects the playlist that is already playing, just
+                    // navigate to Now Playing without restarting playback, queue, or rescanning.
+                    if requested_is_active && is_playing_or_paused && folders_match_active {
+                        self.state.screen = Screen::NowPlaying;
+                        self.state.status = None;
+                        return Ok(());
+                    }
+
                     // Defined behavior: if user loads a playlist during playback, we stop playback,
                     // swap folders immediately, rescan the library, and return to the main menu.
                     let stopped_playback =
@@ -472,6 +564,12 @@ impl TuiApp {
                     self.state.playlists.active = Some(p.id.clone());
                     self.persistence
                         .save_playlists(&self.state.paths, &self.state.playlists)?;
+                    tracing::info!(
+                        playlist_id = %p.id,
+                        playlist_name = %p.name,
+                        stopped_playback,
+                        "playlist loaded"
+                    );
 
                     // Proactively rescan so the library/queue view matches the newly active playlist.
                     let req = self.active_folders_scan_request(ScanOrigin::LoadPlaylist {
@@ -487,7 +585,9 @@ impl TuiApp {
     }
 
     fn active_folders_scan_request(&self, origin: ScanOrigin) -> AppResult<ScanRequest> {
-        let min_size_bytes = self
+        // Keep options-level min_size_bytes consistent with settings.min_size_kb (and ignore the
+        // derived field to avoid staleness if callers modify min_size_kb directly in tests).
+        let default_min_size_bytes = self
             .state
             .cfg
             .settings
@@ -501,16 +601,25 @@ impl TuiApp {
             .cfg
             .folders
             .iter()
-            .map(|f| FolderScanEntry {
-                path: f.path.clone(),
-                root_only: f.root_only,
+            .map(|f| {
+                let eff_kb = effective_min_size_kb_for_folder(f, &self.state.cfg.settings);
+                let min_size_bytes = eff_kb.checked_mul(1024).ok_or_else(|| AppError::Config {
+                    message: "effective min_size_kb is too large".to_string(),
+                })?;
+                Ok(FolderScanEntry {
+                    path: f.path.clone(),
+                    scan_depth: f.scan_depth,
+                    min_size_bytes,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<AppResult<Vec<_>>>()?;
         Ok(ScanRequest {
             folders,
             opts: ScanOptions {
                 supported_extensions: self.state.cfg.settings.supported_extensions.clone(),
-                min_size_bytes,
+                // Note: per-folder filtering uses `FolderScanEntry.min_size_bytes`.
+                // This is retained for scan APIs that still rely on options-level min_size.
+                min_size_bytes: default_min_size_bytes,
                 allow_name_size_fallback_dedup: true,
                 force_canonicalize_fail: false,
             },
@@ -738,11 +847,54 @@ impl TuiApp {
     }
 }
 
+fn normalize_folders(folders: &[FolderEntry]) -> Vec<FolderEntry> {
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    let mut out = Vec::with_capacity(folders.len());
+    for f in folders {
+        if seen.insert(f.path.clone()) {
+            out.push(f.clone());
+        }
+    }
+    out
+}
+
 fn playlist_id(name: &str) -> String {
     let mut h = DefaultHasher::new();
     name.to_lowercase().hash(&mut h);
     let v = h.finish();
     format!("p{:016x}", v)
+}
+
+fn next_volume_percent(available: &[u8], current: u8) -> u8 {
+    if available.is_empty() {
+        return current;
+    }
+    match available.binary_search(&current) {
+        Ok(idx) => available
+            .get(idx.saturating_add(1))
+            .copied()
+            .unwrap_or(current),
+        Err(insert_idx) => available.get(insert_idx).copied().unwrap_or(current),
+    }
+}
+
+fn prev_volume_percent(available: &[u8], current: u8) -> u8 {
+    if available.is_empty() {
+        return current;
+    }
+    match available.binary_search(&current) {
+        Ok(idx) => available
+            .get(idx.saturating_sub(1))
+            .copied()
+            .unwrap_or(current),
+        Err(insert_idx) => {
+            if insert_idx == 0 {
+                current
+            } else {
+                available.get(insert_idx - 1).copied().unwrap_or(current)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -818,7 +970,6 @@ mod tests {
             base_dir,
             cache_dir: data_dir.join("cache"),
             logs_dir: data_dir.join("logs"),
-            playlists_dir: data_dir.join("playlists"),
             config_path: data_dir.join("config.yaml"),
             playlists_path: data_dir.join("playlists.yaml"),
             state_path: data_dir.join("state.yaml"),
@@ -1009,7 +1160,8 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.folders = vec![FolderEntry {
             path: "C:\\Music".to_string(),
-            root_only: true,
+            scan_depth: crate::config::ScanDepth::RootOnly,
+            custom_min_size_kb: None,
         }];
         let pls = PlaylistsFile::default();
         let (mut app, mock) = app_with_mock(paths, cfg, pls);
@@ -1021,10 +1173,50 @@ mod tests {
             app.state.cfg.folders,
             vec![FolderEntry {
                 path: "C:\\Music".to_string(),
-                root_only: false
+                scan_depth: crate::config::ScanDepth::OneLevel,
+                custom_min_size_kb: None,
             }]
         );
-        assert_eq!(app.state.status.as_deref(), Some("root_only toggled: off"));
+        assert_eq!(app.state.status.as_deref(), Some("scan depth: one-level"));
+    }
+
+    #[test]
+    fn toggle_folder_root_only_cycles_root_only_one_level_recursive_root_only_and_saves_each_time()
+    {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry {
+            path: "C:\\Music".to_string(),
+            scan_depth: crate::config::ScanDepth::RootOnly,
+            custom_min_size_kb: None,
+        }];
+        let pls = PlaylistsFile::default();
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+
+        app.apply(Action::ToggleFolderRootOnlyAt(0)).unwrap();
+        assert_eq!(mock.config_writes(), 1);
+        assert_eq!(
+            app.state.cfg.folders[0].scan_depth,
+            crate::config::ScanDepth::OneLevel
+        );
+        assert_eq!(app.state.status.as_deref(), Some("scan depth: one-level"));
+
+        app.apply(Action::ToggleFolderRootOnlyAt(0)).unwrap();
+        assert_eq!(mock.config_writes(), 2);
+        assert_eq!(
+            app.state.cfg.folders[0].scan_depth,
+            crate::config::ScanDepth::Recursive
+        );
+        assert_eq!(app.state.status.as_deref(), Some("scan depth: recursive"));
+
+        app.apply(Action::ToggleFolderRootOnlyAt(0)).unwrap();
+        assert_eq!(mock.config_writes(), 3);
+        assert_eq!(
+            app.state.cfg.folders[0].scan_depth,
+            crate::config::ScanDepth::RootOnly
+        );
+        assert_eq!(app.state.status.as_deref(), Some("scan depth: root-only"));
     }
 
     #[test]
@@ -1035,11 +1227,13 @@ mod tests {
         cfg.folders = vec![
             FolderEntry {
                 path: "A".to_string(),
-                root_only: true,
+                scan_depth: crate::config::ScanDepth::RootOnly,
+                custom_min_size_kb: None,
             },
             FolderEntry {
                 path: "B".to_string(),
-                root_only: false,
+                scan_depth: crate::config::ScanDepth::Recursive,
+                custom_min_size_kb: None,
             },
         ];
         let pls = PlaylistsFile::default();
@@ -1055,15 +1249,17 @@ mod tests {
             vec![
                 FolderEntry {
                     path: "A".to_string(),
-                    root_only: true,
+                    scan_depth: crate::config::ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 },
                 FolderEntry {
                     path: "B".to_string(),
-                    root_only: true,
+                    scan_depth: crate::config::ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 }
             ]
         );
-        assert_eq!(app.state.status.as_deref(), Some("root_only toggled: on"));
+        assert_eq!(app.state.status.as_deref(), Some("scan depth: root-only"));
     }
 
     #[test]
@@ -1431,6 +1627,167 @@ mod tests {
     }
 
     #[test]
+    fn tz_002_load_playlist_that_is_already_playing_does_not_restart() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let music_dir = td.path().join("music_a");
+        std::fs::create_dir_all(&music_dir).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
+
+        let mut pls = PlaylistsFile::default();
+        pls.playlists.push(Playlist {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            folders: vec![FolderEntry::new(music_dir.to_string_lossy().to_string())],
+            extra: Default::default(),
+        });
+
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+        // Replace the real player handle with a controllable one so we can assert
+        // that no player commands are emitted when the guard triggers.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::Playlists;
+        app.state.playlists.active = Some("p1".to_string());
+        app.state.player.status = PlaybackStatus::Playing;
+        let before_cfg_writes = mock.config_writes();
+        let before_pls_writes = mock.playlists_writes();
+        let before_load_queue_commands_sent = app.load_queue_commands_sent;
+
+        app.apply(Action::LoadPlaylist { idx: 0 }).unwrap();
+
+        assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(mock.config_writes(), before_cfg_writes);
+        assert_eq!(mock.playlists_writes(), before_pls_writes);
+        assert_eq!(app.state.status, None);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "guard should not emit any PlayerCommand (no Stop/LoadQueue/etc)"
+        );
+        assert!(
+            app.scan_job.is_none() && app.pending_scan.is_none(),
+            "guard should not start or queue a scan"
+        );
+        assert_eq!(
+            app.load_queue_commands_sent, before_load_queue_commands_sent,
+            "guard should not load/reload queue"
+        );
+    }
+
+    #[test]
+    fn tz_002_load_playlist_active_but_player_stopped_loads_normally() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        // Create a real folder so the indexer doesn't report MissingFolder issues.
+        let music_dir = td.path().join("music_a");
+        std::fs::create_dir_all(&music_dir).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new("X".to_string())];
+
+        let mut pls = PlaylistsFile::default();
+        pls.playlists.push(Playlist {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            folders: vec![FolderEntry::new(music_dir.to_string_lossy().to_string())],
+            extra: Default::default(),
+        });
+
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+
+        // Use a controllable player and assert LoadPlaylist doesn't emit Stop when already stopped.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::Playlists;
+        app.state.playlists.active = Some("p1".to_string());
+        app.state.player.status = PlaybackStatus::Stopped;
+
+        let before_cfg_writes = mock.config_writes();
+        let before_pls_writes = mock.playlists_writes();
+
+        app.apply(Action::LoadPlaylist { idx: 0 }).unwrap();
+
+        // Normal path: swap folders, save config+playlists, rescan (InlineScanSpawner completes),
+        // and set a "playlist loaded; scan: ..." status.
+        assert_eq!(
+            app.state.cfg.folders,
+            vec![FolderEntry::new(music_dir.to_string_lossy().to_string())]
+        );
+        assert_eq!(app.state.playlists.active.as_deref(), Some("p1"));
+        assert_eq!(mock.config_writes(), before_cfg_writes + 1);
+        assert_eq!(mock.playlists_writes(), before_pls_writes + 1);
+        assert!(
+            app.scan_job.is_none(),
+            "InlineScanSpawner should complete scan synchronously"
+        );
+        assert_eq!(
+            app.state.status.as_deref(),
+            Some("playlist loaded; scan: 0 tracks (issues: 0)")
+        );
+
+        // No Stop should be issued when already stopped, and LoadQueue isn't part of playlist load.
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "stopped playback should not emit Stop/LoadQueue during playlist load"
+        );
+    }
+
+    #[test]
+    fn tz_002_guard_does_not_trigger_when_active_id_matches_but_folders_differ() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let a_dir = td.path().join("A");
+        let b_dir = td.path().join("B");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new(a_dir.to_string_lossy().to_string())];
+
+        let mut pls = PlaylistsFile::default();
+        pls.playlists.push(Playlist {
+            id: "p1".to_string(),
+            name: "Playlist".to_string(),
+            folders: vec![FolderEntry::new(b_dir.to_string_lossy().to_string())],
+            extra: Default::default(),
+        });
+
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::Playlists;
+        app.state.playlists.active = Some("p1".to_string());
+        app.state.player.status = PlaybackStatus::Playing;
+
+        let before_cfg_writes = mock.config_writes();
+        let before_pls_writes = mock.playlists_writes();
+
+        app.apply(Action::LoadPlaylist { idx: 0 }).unwrap();
+
+        assert_eq!(
+            app.state.cfg.folders,
+            vec![FolderEntry::new(b_dir.to_string_lossy().to_string())]
+        );
+        assert_eq!(app.state.playlists.active.as_deref(), Some("p1"));
+        assert_eq!(mock.config_writes(), before_cfg_writes + 1);
+        assert_eq!(mock.playlists_writes(), before_pls_writes + 1);
+
+        // Because playback was active, it should have stopped playback.
+        assert_eq!(cmd_rx.try_recv().unwrap(), PlayerCommand::Stop);
+    }
+
+    #[test]
     fn ost_008_rescan_while_playing_empty_library_stops_and_returns_to_main_menu() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
@@ -1763,11 +2120,40 @@ mod tests {
     }
 
     #[test]
-    fn volume_actions_send_adjust_volume_command_with_config_step_and_sign() {
+    fn tz_005_focus_activity_action_is_forwarded_to_player_as_set_ui_activity_command() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let cfg = AppConfig::default();
+        let pls = PlaylistsFile::default();
+        let (mut app, _mock) = app_with_mock(paths, cfg, pls);
+
+        // Replace the real player handle with a controllable one.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.apply(Action::PlayerSetUiActivity {
+            focused: false,
+            minimized: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            PlayerCommand::SetUiActivity {
+                focused: false,
+                minimized: true
+            }
+        );
+    }
+
+    #[test]
+    fn volume_actions_send_set_volume_percent_to_prev_next_rung() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
         let mut cfg = AppConfig::default();
-        cfg.audio.volume_step_percent = 7;
+        cfg.audio.volume_available_percent = vec![0u8, 5, 7, 10, 100];
+        cfg.audio.volume_default_percent = 7;
         let pls = PlaylistsFile::default();
         let (mut app, _mock) = app_with_mock(paths, cfg, pls);
 
@@ -1779,22 +2165,23 @@ mod tests {
         app.apply(Action::VolumeUp).unwrap();
         assert_eq!(
             cmd_rx.try_recv().unwrap(),
-            PlayerCommand::AdjustVolumePercent(7)
+            PlayerCommand::SetVolumePercent(10)
         );
 
         app.apply(Action::VolumeDown).unwrap();
         assert_eq!(
             cmd_rx.try_recv().unwrap(),
-            PlayerCommand::AdjustVolumePercent(-7)
+            PlayerCommand::SetVolumePercent(5)
         );
     }
 
     #[test]
-    fn volume_actions_cap_step_to_100_before_sending() {
+    fn volume_actions_use_prev_next_even_when_current_volume_is_not_exactly_on_a_rung() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
         let mut cfg = AppConfig::default();
-        cfg.audio.volume_step_percent = 250;
+        cfg.audio.volume_available_percent = vec![0u8, 5, 7, 10, 100];
+        cfg.audio.volume_default_percent = 6;
         let pls = PlaylistsFile::default();
         let (mut app, _mock) = app_with_mock(paths, cfg, pls);
 
@@ -1805,13 +2192,13 @@ mod tests {
         app.apply(Action::VolumeUp).unwrap();
         assert_eq!(
             cmd_rx.try_recv().unwrap(),
-            PlayerCommand::AdjustVolumePercent(100)
+            PlayerCommand::SetVolumePercent(7)
         );
 
         app.apply(Action::VolumeDown).unwrap();
         assert_eq!(
             cmd_rx.try_recv().unwrap(),
-            PlayerCommand::AdjustVolumePercent(-100)
+            PlayerCommand::SetVolumePercent(5)
         );
     }
 }

@@ -9,7 +9,7 @@ A lightweight, portable terminal-based music player for **Windows 11** (and Linu
 - **Global Hotkeys** (Windows/Linux): Control playback worldwide—play/pause, next/previous, seek, shuffle, and repeat toggles work even when the app is minimized.
 - **Shuffle & Repeat Modes**: Shuffle tracks, loop all, or loop the current track.
 - **Playlist Management**: Save and load playlists as named collections of folders.
-- **Size Filtering**: Skip small files (podcasts ads, silence, etc.) with configurable `min_size_bytes`.
+- **Size Filtering**: Skip small files (podcast ads, silence, etc.) with configurable `min_size_kb` (persisted). Effective bytes are derived as `min_size_kb * 1024`.
 - **Background Playback**: Minimize the terminal; audio continues playing.
 
 ## Installation & Setup
@@ -48,13 +48,12 @@ On first launch, the app creates `data/` in the same directory with default `con
 ```
 ost_player.exe
 data/
-  ├── config.yaml           # Settings: min_size_bytes, shuffle, repeat, active folders, hotkeys
+  ├── config.yaml           # Settings: min_size_kb, shuffle, repeat, active folders, hotkeys, logging
   ├── playlists.yaml        # Named playlists and which is currently active
   ├── state.yaml            # Playback state (current track index, position, etc.)
-  ├── logs/                 # Application logs (debug info, errors, warnings)
-  │   └── latest.log
+  ├── logs/                 # Application logs (10-day buckets; retention cleanup on startup)
   ├── cache/                # Internal caches (if any)
-  └── playlists/            # (Future) Individual playlist files for advanced use
+  # Playlists live in playlists.yaml (no extra subdirectories)
 ```
 
 ## Configuration
@@ -65,7 +64,7 @@ All configuration is human-editable YAML. The app validates on startup and repor
 
 ```yaml
 settings:
-  min_size_bytes: 1000000          # Skip files smaller than this (default: 1 MB)
+  min_size_kb: 1024                # Skip files smaller than this (default: 1024 KB = 1 MB)
   shuffle: false                   # Shuffle queue (default: off)
   repeat: off                       # off | all | one (default: off)
   supported_extensions:
@@ -119,6 +118,10 @@ hotkeys:
 audio:
   default_volume_percent: 75        # Initial volume on app startup (0-100, default: 75)
   volume_step_percent: 5            # Volume change per hotkey press (default: 5)
+
+logging:
+  default_level: default            # default | debug | trace
+  retention_days: 31                # delete logs older than this many days on startup
 ```
 
 > **Note**: Hotkeys use modifier aliases:
@@ -249,13 +252,13 @@ For CI/CD, see `.github/workflows/ci.yml`; it runs on Windows and Linux on every
 - **Cause**: Folders are empty, files are too small, or wrong extensions.
 - **Check**:
   - Edit `config.yaml` and verify folder paths are correct.
-  - Confirm files are `.mp3` or `.ogg` and ≥ `min_size_bytes`.
-  - Check logs in `data/logs/latest.log` for scan errors.
+  - Confirm files are `.mp3` or `.ogg` and ≥ your configured `settings.min_size_kb`.
+  - Check logs in `data/logs/` for scan errors (bucketed files like `YYYY-MM-01_10.log`).
 
 ### Hotkeys Not Working
 - **Cause**: Conflicting system hotkeys or clipboard manager.
 - **Fix**: Change the bindings in `config.yaml` or disable the conflicting app.
-- **Check**: Logs in `data/logs/latest.log` show which hotkeys failed to register.
+- **Check**: Logs in `data/logs/` (bucketed files like `YYYY-MM-01_10.log`) show which hotkeys failed to register.
 
 ### Audio Glitches or Stuttering
 - **Cause**: Weak PC, high system load, or unsupported audio format.

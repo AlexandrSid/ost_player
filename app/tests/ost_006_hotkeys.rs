@@ -103,8 +103,16 @@ folders: []
 "#;
 
     let cfg: AppConfig = parse_yaml(raw);
-    assert_eq!(cfg.audio.default_volume_percent, 75);
-    assert_eq!(cfg.audio.volume_step_percent, 5);
+    assert_eq!(cfg.audio.volume_default_percent, 75);
+    assert!(
+        !cfg.audio.volume_available_percent.is_empty(),
+        "default audio.volume_available_percent should not be empty"
+    );
+    assert_eq!(cfg.audio.volume_available_percent.first().copied(), Some(0));
+    assert_eq!(
+        cfg.audio.volume_available_percent.last().copied(),
+        Some(100)
+    );
 }
 
 #[test]
@@ -120,8 +128,11 @@ audio:
 "#;
 
     let cfg: AppConfig = parse_yaml(raw);
-    assert_eq!(cfg.audio.default_volume_percent, 42);
-    assert_eq!(cfg.audio.volume_step_percent, 7);
+    assert_eq!(cfg.audio.volume_default_percent, 42);
+    assert_eq!(
+        cfg.audio.volume_available_percent,
+        vec![0u8, 7, 14, 21, 28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 100]
+    );
 }
 
 #[test]

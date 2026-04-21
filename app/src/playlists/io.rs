@@ -60,7 +60,6 @@ mod tests {
             base_dir,
             cache_dir: data_dir.join("cache"),
             logs_dir: data_dir.join("logs"),
-            playlists_dir: data_dir.join("playlists"),
             config_path: data_dir.join("config.yaml"),
             playlists_path: data_dir.join("playlists.yaml"),
             state_path: data_dir.join("state.yaml"),
@@ -123,7 +122,7 @@ playlists:
     }
 
     #[test]
-    fn legacy_playlists_folders_vec_string_deserializes_as_folder_entries_root_only_true() {
+    fn legacy_playlists_folders_vec_string_deserializes_as_folder_entries_scan_depth_root_only() {
         let raw = r#"
 schema_version: 1
 active: null
@@ -136,13 +135,19 @@ playlists:
         assert_eq!(pls.playlists.len(), 1);
         assert_eq!(pls.playlists[0].folders.len(), 2);
         assert_eq!(pls.playlists[0].folders[0].path, "C:\\Music");
-        assert!(pls.playlists[0].folders[0].root_only);
+        assert_eq!(
+            pls.playlists[0].folders[0].scan_depth,
+            crate::config::ScanDepth::RootOnly
+        );
         assert_eq!(pls.playlists[0].folders[1].path, "D:\\OST");
-        assert!(pls.playlists[0].folders[1].root_only);
+        assert_eq!(
+            pls.playlists[0].folders[1].scan_depth,
+            crate::config::ScanDepth::RootOnly
+        );
     }
 
     #[test]
-    fn playlists_serialization_skips_root_only_true_but_keeps_false() {
+    fn playlists_serialization_skips_default_scan_depth_but_keeps_non_default() {
         let pls = PlaylistsFile {
             schema_version: 1,
             active: None,
@@ -152,11 +157,13 @@ playlists:
                 folders: vec![
                     crate::config::FolderEntry {
                         path: "C:\\Music".to_string(),
-                        root_only: true,
+                        scan_depth: crate::config::ScanDepth::RootOnly,
+                        custom_min_size_kb: None,
                     },
                     crate::config::FolderEntry {
                         path: "D:\\OST".to_string(),
-                        root_only: false,
+                        scan_depth: crate::config::ScanDepth::Recursive,
+                        custom_min_size_kb: None,
                     },
                 ],
                 extra: Default::default(),
@@ -165,7 +172,7 @@ playlists:
         };
 
         let y = serde_yaml::to_string(&pls).unwrap();
-        assert!(!y.contains("root_only: true"));
-        assert!(y.contains("root_only: false"));
+        assert!(!y.contains("scan_depth: root_only"));
+        assert!(y.contains("scan_depth: recursive"));
     }
 }

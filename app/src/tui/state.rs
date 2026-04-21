@@ -35,7 +35,7 @@ impl AppState {
         let player = PlayerSnapshot {
             shuffle: cfg.settings.shuffle,
             repeat: cfg.settings.repeat,
-            volume_percent: cfg.audio.default_volume_percent,
+            volume_percent: cfg.audio.volume_default_percent,
             ..Default::default()
         };
         Self {

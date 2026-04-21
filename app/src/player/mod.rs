@@ -144,6 +144,12 @@ pub enum PlayerCommand {
         tracks: Vec<PathBuf>,
         start_index: usize,
     },
+    /// Communicates UI activity state to the player so it can decide
+    /// how frequently to emit `PlayerSnapshot`s.
+    SetUiActivity {
+        focused: bool,
+        minimized: bool,
+    },
     TogglePlayPause,
     Stop,
     Next,
@@ -311,6 +317,9 @@ fn playback_thread(
                 if engine.on_tick() {
                     engine.emit_snapshot(&evt_tx);
                 }
+                if engine.on_periodic_snapshot_tick() {
+                    engine.emit_snapshot(&evt_tx);
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 engine.stop();
@@ -318,6 +327,12 @@ fn playback_thread(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UiActivity {
+    focused: bool,
+    minimized: bool,
 }
 
 struct Engine {
@@ -334,6 +349,9 @@ struct Engine {
     current_path: Option<PathBuf>,
     current_duration: Option<Duration>,
     last_error: Option<String>,
+
+    ui_activity: UiActivity,
+    last_snapshot_at: Instant,
 }
 
 impl Engine {
@@ -341,6 +359,7 @@ impl Engine {
         let mut backend = RodioBackend::new();
         let backend_available = backend.try_init().is_ok();
         let volume_percent = initial_volume_percent.min(100);
+        let now = Instant::now();
         Self {
             backend: Box::new(backend),
             backend_available,
@@ -353,6 +372,11 @@ impl Engine {
             current_path: None,
             current_duration: None,
             last_error: None,
+            ui_activity: UiActivity {
+                focused: true,
+                minimized: false,
+            },
+            last_snapshot_at: now,
         }
     }
 
@@ -366,6 +390,7 @@ impl Engine {
         let mut backend = backend;
         let backend_available = backend.try_init().is_ok();
         let volume_percent = initial_volume_percent.min(100);
+        let now = Instant::now();
         Self {
             backend,
             backend_available,
@@ -378,10 +403,16 @@ impl Engine {
             current_path: None,
             current_duration: None,
             last_error: None,
+            ui_activity: UiActivity {
+                focused: true,
+                minimized: false,
+            },
+            last_snapshot_at: now,
         }
     }
 
-    fn emit_snapshot(&self, evt_tx: &mpsc::Sender<PlayerEvent>) {
+    fn emit_snapshot(&mut self, evt_tx: &mpsc::Sender<PlayerEvent>) {
+        self.last_snapshot_at = Instant::now();
         let queue_pos = self.queue.pos_in_order();
         let queue_len = self.queue.order_len();
         let track_position = self
@@ -399,6 +430,37 @@ impl Engine {
             track_duration: self.current_duration,
             last_error: self.last_error.clone(),
         }));
+    }
+
+    fn on_periodic_snapshot_tick(&mut self) -> bool {
+        let now = Instant::now();
+        let Some(interval) = self.periodic_snapshot_interval() else {
+            return false;
+        };
+        if now.duration_since(self.last_snapshot_at) < interval {
+            return false;
+        }
+        self.last_snapshot_at = now;
+        true
+    }
+
+    fn periodic_snapshot_interval(&self) -> Option<Duration> {
+        // Refresh cadence policy:
+        // - focused + playing: every 1s
+        // - playing xor focused: every 5s
+        // - minimized: may be disabled (preferred)
+        if self.ui_activity.minimized {
+            return None;
+        }
+        let playing = self.status == PlaybackStatus::Playing;
+        let focused = self.ui_activity.focused;
+        if playing && focused {
+            Some(Duration::from_secs(1))
+        } else if playing ^ focused {
+            Some(Duration::from_secs(5))
+        } else {
+            None
+        }
     }
 
     fn on_tick(&mut self) -> bool {
@@ -428,6 +490,10 @@ impl Engine {
                 }
                 let start_pos = self.queue.pos_in_order().unwrap_or(0);
                 self.play_from_pos_with_skip(start_pos, SeekDirection::Forward)
+            }
+            PlayerCommand::SetUiActivity { focused, minimized } => {
+                self.ui_activity = UiActivity { focused, minimized };
+                Ok(())
             }
             PlayerCommand::TogglePlayPause => self.toggle_play_pause(),
             PlayerCommand::Stop => {
@@ -787,6 +853,84 @@ mod tests {
             default_output_ok: true,
             fail_append: false,
         }
+    }
+
+    #[test]
+    fn tz_005_periodic_snapshot_interval_matches_policy_matrix() {
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
+
+        // minimized disables periodic snapshots regardless of focus/playback.
+        e.ui_activity = UiActivity {
+            focused: true,
+            minimized: true,
+        };
+        e.status = PlaybackStatus::Playing;
+        assert_eq!(e.periodic_snapshot_interval(), None);
+
+        // focused + playing => 1s
+        e.ui_activity = UiActivity {
+            focused: true,
+            minimized: false,
+        };
+        e.status = PlaybackStatus::Playing;
+        assert_eq!(e.periodic_snapshot_interval(), Some(Duration::from_secs(1)));
+
+        // playing xor focused => 5s (playing but not focused)
+        e.ui_activity = UiActivity {
+            focused: false,
+            minimized: false,
+        };
+        e.status = PlaybackStatus::Playing;
+        assert_eq!(e.periodic_snapshot_interval(), Some(Duration::from_secs(5)));
+
+        // playing xor focused => 5s (focused but not playing)
+        e.ui_activity = UiActivity {
+            focused: true,
+            minimized: false,
+        };
+        e.status = PlaybackStatus::Stopped;
+        assert_eq!(e.periodic_snapshot_interval(), Some(Duration::from_secs(5)));
+
+        // neither playing nor focused => disabled
+        e.ui_activity = UiActivity {
+            focused: false,
+            minimized: false,
+        };
+        e.status = PlaybackStatus::Stopped;
+        assert_eq!(e.periodic_snapshot_interval(), None);
+    }
+
+    #[test]
+    fn tz_005_on_periodic_snapshot_tick_fires_only_after_interval_elapsed_and_not_when_disabled() {
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 75);
+
+        // Enabled: focused + playing => 1s
+        e.ui_activity = UiActivity {
+            focused: true,
+            minimized: false,
+        };
+        e.status = PlaybackStatus::Playing;
+
+        // Not enough time elapsed.
+        e.last_snapshot_at = Instant::now();
+        assert!(!e.on_periodic_snapshot_tick());
+
+        // Enough time elapsed.
+        let old = Instant::now() - Duration::from_secs(2);
+        e.last_snapshot_at = old;
+        assert!(e.on_periodic_snapshot_tick());
+        assert!(
+            e.last_snapshot_at > old,
+            "tick should advance last_snapshot_at when it fires"
+        );
+
+        // Disabled when minimized.
+        e.ui_activity = UiActivity {
+            focused: true,
+            minimized: true,
+        };
+        e.last_snapshot_at = Instant::now() - Duration::from_secs(10);
+        assert!(!e.on_periodic_snapshot_tick());
     }
 
     #[derive(Clone)]
@@ -1159,7 +1303,7 @@ mod tests {
 
     #[test]
     fn snapshot_includes_volume_percent_and_clamps_initial_over_100() {
-        let e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 250);
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend_ok()), 250);
 
         let (tx, rx) = mpsc::channel::<PlayerEvent>();
         e.emit_snapshot(&tx);

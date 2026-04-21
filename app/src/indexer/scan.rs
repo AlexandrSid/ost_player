@@ -1,3 +1,4 @@
+use crate::config::ScanDepth;
 use crate::indexer::model::{
     FolderScanEntry, IndexIssue, IndexIssueKind, IndexReport, LibraryIndex, ScanOptions,
     TrackEntry, TrackId,
@@ -12,7 +13,8 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
         .iter()
         .map(|p| FolderScanEntry {
             path: p.clone(),
-            root_only: false,
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: options.min_size_bytes,
         })
         .collect::<Vec<_>>();
     scan_library_folders(&folders, options)
@@ -57,12 +59,20 @@ pub fn scan_library_folders(folders: &[FolderScanEntry], options: &ScanOptions) 
         };
 
         let root_key = canonical_dedup_key(&root_canon);
+        let max_depth = match folder.scan_depth {
+            ScanDepth::RootOnly => Some(0usize),
+            ScanDepth::OneLevel => Some(1usize),
+            ScanDepth::Recursive => None,
+        };
+        let min_size_bytes = folder.min_size_bytes;
         if let Err(e) = scan_dir(
             &root_canon,
             &root_canon,
             root_key.as_os_str(),
             &options,
-            !folder.root_only,
+            min_size_bytes,
+            0,
+            max_depth,
             &mut tracks,
             &mut seen_paths,
             &mut seen_rel_size,
@@ -119,7 +129,9 @@ fn scan_dir(
     dir: &Path,
     root_key: &OsStr,
     options: &ScanOptions,
-    recurse: bool,
+    min_size_bytes: u64,
+    cur_depth: usize,
+    max_depth: Option<usize>,
     out_tracks: &mut Vec<TrackEntry>,
     seen_paths: &mut BTreeSet<OsString>,
     seen_rel_size: &mut HashSet<(OsString, OsString, u64)>,
@@ -154,13 +166,19 @@ fn scan_dir(
         };
 
         if ft.is_dir() {
-            if recurse {
+            let can_recurse = match max_depth {
+                None => true,
+                Some(max) => cur_depth < max,
+            };
+            if can_recurse {
                 if let Err(e) = scan_dir(
                     root,
                     &path,
                     root_key,
                     options,
-                    recurse,
+                    min_size_bytes,
+                    cur_depth.saturating_add(1),
+                    max_depth,
                     out_tracks,
                     seen_paths,
                     seen_rel_size,
@@ -200,7 +218,7 @@ fn scan_dir(
         };
 
         let size = meta.len();
-        if size < options.min_size_bytes {
+        if size < min_size_bytes {
             report.skipped_small += 1;
             continue;
         }
@@ -419,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn root_only_true_scans_only_top_level_files() {
+    fn root_only_scan_depth_scans_only_top_level_files() {
         let td = tempfile::tempdir().unwrap();
         let root = td.path().join("music");
         let root_track = root.join("a.ogg");
@@ -436,7 +454,8 @@ mod tests {
 
         let folders = vec![FolderScanEntry {
             path: root.to_string_lossy().to_string(),
-            root_only: true,
+            scan_depth: ScanDepth::RootOnly,
+            min_size_bytes: 1,
         }];
 
         let index = scan_library_folders(&folders, &opts);
@@ -446,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn root_only_false_scans_recursively() {
+    fn recursive_scan_depth_scans_recursively() {
         let td = tempfile::tempdir().unwrap();
         let root = td.path().join("music");
         let root_track = root.join("a.ogg");
@@ -463,11 +482,102 @@ mod tests {
 
         let folders = vec![FolderScanEntry {
             path: root.to_string_lossy().to_string(),
-            root_only: false,
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 1,
         }];
 
         let index = scan_library_folders(&folders, &opts);
         assert_eq!(index.report.issues.len(), 0);
         assert_eq!(index.tracks.len(), 2);
+    }
+
+    #[test]
+    fn one_level_scan_depth_scans_root_and_direct_subfolders_only() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().join("music");
+        let root_track = root.join("a.ogg");
+        let sub1_track = root.join("sub1").join("b.ogg");
+        let sub2_track = root.join("sub1").join("sub2").join("c.ogg");
+        write_dummy_file(&root_track, 16);
+        write_dummy_file(&sub1_track, 16);
+        write_dummy_file(&sub2_track, 16);
+
+        let opts = ScanOptions {
+            supported_extensions: vec!["ogg".to_string()],
+            min_size_bytes: 1,
+            allow_name_size_fallback_dedup: true,
+            force_canonicalize_fail: false,
+        };
+
+        let folders = vec![FolderScanEntry {
+            path: root.to_string_lossy().to_string(),
+            scan_depth: ScanDepth::OneLevel,
+            min_size_bytes: 1,
+        }];
+
+        let index = scan_library_folders(&folders, &opts);
+        assert_eq!(index.report.issues.len(), 0);
+        assert_eq!(
+            index.tracks.len(),
+            2,
+            "expected to include root + depth=1, but not depth=2"
+        );
+        let joined = index
+            .tracks
+            .iter()
+            .map(|t| t.path.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("a.ogg"),
+            "missing root track; got:\n{joined}"
+        );
+        assert!(
+            joined.contains("b.ogg"),
+            "missing depth-1 track; got:\n{joined}"
+        );
+        assert!(
+            !joined.contains("c.ogg"),
+            "unexpected depth-2 track; got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn per_folder_min_size_bytes_filters_files_per_root() {
+        let td = tempfile::tempdir().unwrap();
+        let root_a = td.path().join("a");
+        let root_b = td.path().join("b");
+        let a_small = root_a.join("s.ogg");
+        let b_small = root_b.join("s.ogg");
+        write_dummy_file(&a_small, 16);
+        write_dummy_file(&b_small, 16);
+
+        let opts = ScanOptions {
+            supported_extensions: vec!["ogg".to_string()],
+            min_size_bytes: 1, // ignored; per-folder min_size_bytes is used
+            allow_name_size_fallback_dedup: true,
+            force_canonicalize_fail: false,
+        };
+
+        let folders = vec![
+            FolderScanEntry {
+                path: root_a.to_string_lossy().to_string(),
+                scan_depth: ScanDepth::RootOnly,
+                min_size_bytes: 1,
+            },
+            FolderScanEntry {
+                path: root_b.to_string_lossy().to_string(),
+                scan_depth: ScanDepth::RootOnly,
+                min_size_bytes: 1000, // filters out 16-byte file
+            },
+        ];
+
+        let index = scan_library_folders(&folders, &opts);
+        assert_eq!(index.report.issues.len(), 0);
+        assert_eq!(index.tracks.len(), 1);
+        assert!(index.tracks[0].path.ends_with("s.ogg"));
+        // Ensure it came from root_a not root_b by checking parent folder.
+        let p = index.tracks[0].path.to_string_lossy().to_string();
+        assert!(p.contains("\\a\\") || p.contains("/a/"), "got path: {p}");
     }
 }

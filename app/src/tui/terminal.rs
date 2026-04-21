@@ -11,11 +11,12 @@ use crossterm::{
 };
 use ratatui::{prelude::*, Terminal};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct TerminalRestoreGuard {
     raw_mode_enabled: bool,
     alt_screen_enabled: bool,
+    focus_change_enabled: bool,
 }
 
 impl TerminalRestoreGuard {
@@ -37,9 +38,14 @@ impl TerminalRestoreGuard {
         // Keep cursor visible: some terminals hide it on alt-screen entry.
         let _ = execute!(stdout, cursor::Show);
 
+        // Best-effort: enables FocusGained/FocusLost reporting where supported.
+        // Ignore errors to keep cross-platform behavior.
+        let focus_change_enabled = execute!(stdout, event::EnableFocusChange).is_ok();
+
         Ok(Self {
             raw_mode_enabled: true,
             alt_screen_enabled: true,
+            focus_change_enabled,
         })
     }
 }
@@ -47,6 +53,9 @@ impl TerminalRestoreGuard {
 impl Drop for TerminalRestoreGuard {
     fn drop(&mut self) {
         let mut stdout = io::stdout();
+        if self.focus_change_enabled {
+            let _ = execute!(stdout, event::DisableFocusChange);
+        }
         if self.alt_screen_enabled {
             let _ = execute!(stdout, LeaveAlternateScreen);
         }
@@ -76,20 +85,41 @@ pub fn run(app: &mut TuiApp) -> AppResult<()> {
     };
 
     let res: AppResult<()> = (|| {
+        let mut focused = true;
+        let mut minimized = false;
+        let mut needs_redraw = true;
+        let mut last_redraw_at = Instant::now() - Duration::from_secs(60);
+
+        // Tell the player our initial best-effort UI activity state.
+        bus.emit_action(
+            CommandSource::System,
+            Action::PlayerSetUiActivity { focused, minimized },
+        );
+
         loop {
             while let Some(msg) = bus.try_recv() {
+                needs_redraw = true;
                 if handle_bus_message(app, msg)? {
                     return Ok(());
                 }
             }
 
-            terminal
-                .draw(|f| crate::tui::ui::draw(f, app))
-                .map_err(anyhow::Error::new)?;
+            let now = Instant::now();
+            if is_redraw_due(app, focused, minimized, last_redraw_at, now) {
+                needs_redraw = true;
+            }
 
-            // Allow periodic screen ticks (e.g. transient status clearing later).
-            if let Some(action) = app.tick()? {
-                bus.emit_action(CommandSource::System, action);
+            if needs_redraw {
+                terminal
+                    .draw(|f| crate::tui::ui::draw(f, app))
+                    .map_err(anyhow::Error::new)?;
+                last_redraw_at = Instant::now();
+                needs_redraw = false;
+
+                // Allow periodic screen ticks (e.g. status clearing).
+                if let Some(action) = app.tick()? {
+                    bus.emit_action(CommandSource::System, action);
+                }
             }
 
             while let Some(msg) = bus.try_recv() {
@@ -98,7 +128,8 @@ pub fn run(app: &mut TuiApp) -> AppResult<()> {
                 }
             }
 
-            if event::poll(Duration::from_millis(50)).map_err(|e| AppError::Io {
+            let poll_timeout = next_poll_timeout(app, focused, minimized, last_redraw_at);
+            if event::poll(poll_timeout).map_err(|e| AppError::Io {
                 path: "<event_poll>".into(),
                 source: e,
             })? {
@@ -110,16 +141,53 @@ pub fn run(app: &mut TuiApp) -> AppResult<()> {
                         if key.kind != KeyEventKind::Press {
                             continue;
                         }
+                        needs_redraw = true;
                         if let Some(action) = app.on_key(key)? {
                             bus.emit_action(CommandSource::Tui, action);
                         }
                     }
                     Event::Paste(text) => {
+                        needs_redraw = true;
                         if let Some(action) = app.on_paste(&text)? {
                             bus.emit_action(CommandSource::Tui, action);
                         }
                     }
+                    Event::FocusGained => {
+                        focused = true;
+                        minimized = false;
+                        needs_redraw = true;
+                        bus.emit_action(
+                            CommandSource::System,
+                            Action::PlayerSetUiActivity { focused, minimized },
+                        );
+                    }
+                    Event::FocusLost => {
+                        focused = false;
+                        needs_redraw = true;
+                        bus.emit_action(
+                            CommandSource::System,
+                            Action::PlayerSetUiActivity { focused, minimized },
+                        );
+                    }
+                    Event::Resize(w, h) => {
+                        // Best-effort minimize detection: some terminals report 0x0 when minimized.
+                        let next_minimized = w == 0 || h == 0;
+                        if next_minimized != minimized {
+                            minimized = next_minimized;
+                            needs_redraw = true;
+                            bus.emit_action(
+                                CommandSource::System,
+                                Action::PlayerSetUiActivity { focused, minimized },
+                            );
+                        }
+                    }
                     _ => {}
+                }
+            } else {
+                // Timeout -> redraw only if cadence says it's due.
+                let now = Instant::now();
+                if is_redraw_due(app, focused, minimized, last_redraw_at, now) {
+                    needs_redraw = true;
                 }
             }
         }
@@ -131,6 +199,56 @@ pub fn run(app: &mut TuiApp) -> AppResult<()> {
     }
 
     res
+}
+
+fn refresh_interval(app: &TuiApp, focused: bool, minimized: bool) -> Option<Duration> {
+    if minimized {
+        return None;
+    }
+    let playing = app.state.player.status == crate::player::PlaybackStatus::Playing;
+    if playing && focused {
+        Some(Duration::from_secs(1))
+    } else if playing ^ focused {
+        Some(Duration::from_secs(5))
+    } else {
+        None
+    }
+}
+
+fn is_redraw_due(
+    app: &TuiApp,
+    focused: bool,
+    minimized: bool,
+    last_redraw_at: Instant,
+    now: Instant,
+) -> bool {
+    let Some(interval) = refresh_interval(app, focused, minimized) else {
+        return false;
+    };
+    now.duration_since(last_redraw_at) >= interval
+}
+
+fn next_poll_timeout(
+    app: &TuiApp,
+    focused: bool,
+    minimized: bool,
+    last_redraw_at: Instant,
+) -> Duration {
+    // Without a cross-platform "select" over terminal events and our command bus,
+    // keep polling bounded so hotkeys remain responsive.
+    let bus_check_interval = if minimized {
+        Duration::from_millis(1000)
+    } else {
+        Duration::from_millis(200)
+    };
+
+    let Some(refresh) = refresh_interval(app, focused, minimized) else {
+        return bus_check_interval;
+    };
+    let next_refresh_at = last_redraw_at + refresh;
+    let now = Instant::now();
+    let remaining = next_refresh_at.saturating_duration_since(now);
+    remaining.min(bus_check_interval)
 }
 
 fn handle_action(app: &mut TuiApp, action: Action) -> AppResult<bool> {

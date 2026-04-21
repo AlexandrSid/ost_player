@@ -5,11 +5,20 @@ pub enum Action {
     SetStatus(String),
     ClearStatus,
 
+    /// Best-effort signal from the terminal event loop to the player thread.
+    /// Used to control periodic snapshot emission and TUI refresh cadence.
+    PlayerSetUiActivity {
+        focused: bool,
+        minimized: bool,
+    },
+
     SelectFolderDelta(i32),
     SelectPlaylistDelta(i32),
 
     // Player
-    PlayerLoadFromLibrary { start_index: usize },
+    PlayerLoadFromLibrary {
+        start_index: usize,
+    },
     PlayerTogglePlayPause,
     PlayerStop,
     PlayerNext,
@@ -22,6 +31,11 @@ pub enum Action {
     AddFolder(String),
     RemoveFolderAt(usize),
     ToggleFolderRootOnlyAt(usize),
+    /// Set or clear per-folder custom min_size_kb override (None = use global default).
+    SetFolderCustomMinSizeKb {
+        idx: usize,
+        custom_kb: Option<u32>,
+    },
     SetMinSizeKb(u64),
     ToggleShuffle,
     CycleRepeat,
@@ -30,11 +44,22 @@ pub enum Action {
     RescanLibrary,
 
     // Playlist mutations
-    CreatePlaylist { name: String },
-    RenamePlaylist { idx: usize, name: String },
-    DeletePlaylist { idx: usize },
-    OverwritePlaylistWithCurrent { idx: usize },
-    LoadPlaylist { idx: usize },
+    CreatePlaylist {
+        name: String,
+    },
+    RenamePlaylist {
+        idx: usize,
+        name: String,
+    },
+    DeletePlaylist {
+        idx: usize,
+    },
+    OverwritePlaylistWithCurrent {
+        idx: usize,
+    },
+    LoadPlaylist {
+        idx: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

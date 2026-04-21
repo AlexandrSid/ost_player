@@ -14,7 +14,7 @@ pub struct Playlist {
 
     pub name: String,
 
-    /// Folder list for this playlist. Stored as objects to preserve flags like `root_only`,
+    /// Folder list for this playlist. Stored as objects to preserve flags like `scan_depth`,
     /// while remaining backward compatible with legacy `folders: ["/path", ...]` playlists.
     #[serde(default, deserialize_with = "deserialize_playlist_folders_compat")]
     pub folders: Vec<FolderEntry>,

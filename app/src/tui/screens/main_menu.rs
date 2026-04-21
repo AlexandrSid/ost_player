@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 pub struct MainMenuScreen {
     add_folder: Option<TextInput>,
     confirm_remove: Option<ConfirmDialog>,
+    custom_min_size_input: Option<(usize, TextInput)>,
 }
 
 impl MainMenuScreen {
@@ -38,11 +39,45 @@ impl MainMenuScreen {
             return Ok(None);
         }
 
+        if let Some((idx, input)) = &mut self.custom_min_size_input {
+            if let Some(done) = input.on_key(key) {
+                let idx = *idx;
+                self.custom_min_size_input = None;
+                return Ok(match done {
+                    crate::tui::widgets::TextInputResult::Submit(v) => {
+                        let v = v.trim();
+                        if v.is_empty() {
+                            Some(Action::SetFolderCustomMinSizeKb {
+                                idx,
+                                custom_kb: None,
+                            })
+                        } else {
+                            match v.parse::<u32>() {
+                                Ok(n) => Some(Action::SetFolderCustomMinSizeKb {
+                                    idx,
+                                    custom_kb: Some(n),
+                                }),
+                                Err(_) => Some(Action::SetStatus(
+                                    "custom min_size_kb must be an integer".to_string(),
+                                )),
+                            }
+                        }
+                    }
+                    crate::tui::widgets::TextInputResult::Cancel => Some(Action::ClearStatus),
+                });
+            }
+            return Ok(None);
+        }
+
         Ok(self.handle_normal_key(state, key))
     }
 
     pub fn on_paste(&mut self, _state: &AppState, text: &str) -> AppResult<Option<Action>> {
         if let Some(input) = &mut self.add_folder {
+            input.on_paste(text);
+            return Ok(None);
+        }
+        if let Some((_idx, input)) = &mut self.custom_min_size_input {
             input.on_paste(text);
             return Ok(None);
         }
@@ -79,12 +114,40 @@ impl MainMenuScreen {
                     Some(Action::ToggleFolderRootOnlyAt(state.main_selected_folder))
                 }
             }
-            KeyCode::Char('4') | KeyCode::Enter | KeyCode::Char(' ') => {
+            KeyCode::Char('4') | KeyCode::Char('c') => {
+                if state.cfg.folders.is_empty() {
+                    return Some(Action::SetStatus("no folders to edit".to_string()));
+                }
+                let idx = state
+                    .main_selected_folder
+                    .min(state.cfg.folders.len().saturating_sub(1));
+                let initial = state
+                    .cfg
+                    .folders
+                    .get(idx)
+                    .and_then(|f| f.custom_min_size_kb)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                let min = state.cfg.settings.min_size_custom_kb_min;
+                let max = state.cfg.settings.min_size_custom_kb_max;
+                self.custom_min_size_input = Some((
+                    idx,
+                    TextInput::new(
+                        "Set custom min_size_kb for selected folder (empty = clear)",
+                        initial.as_str(),
+                        &format!("Range {min}..={max}  Enter=save  Esc=cancel"),
+                    ),
+                ));
+                Some(Action::SetStatus(
+                    "editing custom min_size_kb...".to_string(),
+                ))
+            }
+            KeyCode::Char('5') | KeyCode::Enter | KeyCode::Char(' ') => {
                 Some(Action::PlayerLoadFromLibrary { start_index: 0 })
             }
-            KeyCode::Char('5') | KeyCode::Char('s') => Some(Action::Navigate(Screen::Settings)),
-            KeyCode::Char('6') | KeyCode::Char('p') => Some(Action::Navigate(Screen::Playlists)),
-            KeyCode::Char('7') | KeyCode::Char('r') => {
+            KeyCode::Char('6') | KeyCode::Char('s') => Some(Action::Navigate(Screen::Settings)),
+            KeyCode::Char('7') | KeyCode::Char('p') => Some(Action::Navigate(Screen::Playlists)),
+            KeyCode::Char('8') | KeyCode::Char('r') => {
                 if state.cfg.folders.is_empty() {
                     Some(Action::SetStatus(
                         "no folders configured to scan".to_string(),
@@ -101,6 +164,7 @@ impl MainMenuScreen {
         MainMenuView {
             add_folder: self.add_folder.as_ref(),
             confirm_remove: self.confirm_remove.as_ref(),
+            custom_min_size_input: self.custom_min_size_input.as_ref().map(|(_, i)| i),
             folders: &state.cfg.folders,
             selected_folder: state.main_selected_folder,
         }
@@ -110,6 +174,7 @@ impl MainMenuScreen {
 pub struct MainMenuView<'a> {
     pub add_folder: Option<&'a TextInput>,
     pub confirm_remove: Option<&'a ConfirmDialog>,
+    pub custom_min_size_input: Option<&'a TextInput>,
     pub folders: &'a [crate::config::FolderEntry],
     pub selected_folder: usize,
 }
@@ -132,7 +197,6 @@ mod tests {
             data_dir: data_dir.clone(),
             cache_dir: data_dir.join("cache"),
             logs_dir: data_dir.join("logs"),
-            playlists_dir: data_dir.join("playlists"),
             config_path: data_dir.join("config.yaml"),
             playlists_path: data_dir.join("playlists.yaml"),
             state_path: data_dir.join("state.yaml"),
@@ -198,12 +262,40 @@ mod tests {
     }
 
     #[test]
-    fn key_4_emits_play_action() {
+    fn key_4_with_no_folders_emits_status_error_for_custom_min_size_edit() {
         let td = tempfile::tempdir().unwrap();
         let state = make_state(td.path(), vec![]);
 
         let mut screen = MainMenuScreen::default();
         let action = screen.on_key(&state, key('4')).unwrap();
+
+        assert!(matches!(action, Some(Action::SetStatus(_))));
+    }
+
+    #[test]
+    fn key_4_with_folders_opens_custom_min_size_modal_and_sets_status() {
+        let td = tempfile::tempdir().unwrap();
+        let state = make_state(td.path(), vec![FolderEntry::new("A".to_string())]);
+
+        let mut screen = MainMenuScreen::default();
+        let action = screen.on_key(&state, key('4')).unwrap();
+
+        assert_eq!(
+            action,
+            Some(Action::SetStatus(
+                "editing custom min_size_kb...".to_string()
+            ))
+        );
+        assert!(screen.view(&state).custom_min_size_input.is_some());
+    }
+
+    #[test]
+    fn key_5_emits_play_action() {
+        let td = tempfile::tempdir().unwrap();
+        let state = make_state(td.path(), vec![]);
+
+        let mut screen = MainMenuScreen::default();
+        let action = screen.on_key(&state, key('5')).unwrap();
 
         assert_eq!(
             action,
@@ -478,7 +570,7 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let state = make_state(td.path(), vec![]);
 
-        for k in [key('5'), key('s')] {
+        for k in [key('6'), key('s')] {
             let mut screen = MainMenuScreen::default();
             let action = screen.on_key(&state, k).unwrap();
             assert_eq!(action, Some(Action::Navigate(Screen::Settings)));
@@ -490,7 +582,7 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let state = make_state(td.path(), vec![]);
 
-        for k in [key('6'), key('p')] {
+        for k in [key('7'), key('p')] {
             let mut screen = MainMenuScreen::default();
             let action = screen.on_key(&state, k).unwrap();
             assert_eq!(action, Some(Action::Navigate(Screen::Playlists)));
@@ -502,7 +594,7 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let state = make_state(td.path(), vec![FolderEntry::new("A".to_string())]);
 
-        for k in [key('7'), key('r')] {
+        for k in [key('8'), key('r')] {
             let mut screen = MainMenuScreen::default();
             let action = screen.on_key(&state, k).unwrap();
             assert_eq!(action, Some(Action::RescanLibrary));
@@ -514,7 +606,7 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let state = make_state(td.path(), vec![]);
 
-        for k in [key('7'), key('r')] {
+        for k in [key('8'), key('r')] {
             let mut screen = MainMenuScreen::default();
             let action = screen.on_key(&state, k).unwrap();
             assert!(matches!(action, Some(Action::SetStatus(_))));

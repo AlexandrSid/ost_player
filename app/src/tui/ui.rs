@@ -1,12 +1,16 @@
 use crate::player::PlaybackStatus;
 use crate::tui::action::Screen;
 use crate::tui::app::TuiApp;
-use crate::tui::scan_indicator::scan_mode_indicator_fixed;
+use crate::tui::scan_indicator::scan_depth_indicator_fixed;
 use crate::tui::widgets::{ConfirmDialog, TextInput};
+use crate::{config::effective_min_size_kb_for_folder, config::FolderEntry};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+
+const MIN_SIZE_MARKER_GLOBAL: &str = "◼";
+const MIN_SIZE_MARKER_CUSTOM: &str = "🄲";
 
 pub fn draw(frame: &mut Frame, app: &TuiApp) {
     let state = &app.state;
@@ -67,8 +71,13 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
         items.push(ListItem::new("(no folders yet)"));
     } else {
         for (idx, f) in v.folders.iter().enumerate() {
-            let sym = scan_mode_indicator_fixed(f.root_only);
-            items.push(ListItem::new(format!("{:>2}. {sym} {}", idx + 1, f.path)));
+            let sym = scan_depth_indicator_fixed(f.scan_depth);
+            let (marker, eff_kb) = folder_min_size_marker_and_kb(f, &state.cfg.settings);
+            items.push(ListItem::new(format!(
+                "{:>2}. {sym} {marker} {eff_kb}kb {}",
+                idx + 1,
+                f.path
+            )));
         }
     }
 
@@ -89,11 +98,12 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
         "Main menu:",
         "  1 / a  add folder",
         "  2 / d  remove selected folder",
-        "  3 / t  toggle root_only for selected folder",
-        "  4 / Enter / Space  play",
-        "  5 / s  settings",
-        "  6 / p  playlists",
-        "  7 / r  rescan library",
+        "  3 / t  cycle scan depth for selected folder",
+        "  4 / c  set custom min_size for selected folder",
+        "  5 / Enter / Space  play",
+        "  6 / s  settings",
+        "  7 / p  playlists",
+        "  8 / r  rescan library",
         "  0 / q  exit",
         "",
         "Selection:",
@@ -111,6 +121,8 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
         draw_text_input_modal(frame, input);
     } else if let Some(confirm) = v.confirm_remove {
         draw_confirm_modal(frame, confirm);
+    } else if let Some(input) = v.custom_min_size_input {
+        draw_text_input_modal(frame, input);
     }
 }
 
@@ -211,11 +223,21 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
         Screen::Folders => "Not implemented yet.".to_string(),
     });
 
+    let effective_min_size_kb = match state.screen {
+        Screen::MainMenu if !state.cfg.folders.is_empty() => {
+            let idx = state
+                .main_selected_folder
+                .min(state.cfg.folders.len().saturating_sub(1));
+            effective_min_size_kb_for_folder(&state.cfg.folders[idx], &state.cfg.settings)
+        }
+        _ => state.cfg.settings.min_size_kb,
+    };
+
     let text = format!(
         "{}    |    tracks={}  min_size={}kb  shuffle={}  repeat={}  Volume={}%",
         status,
         state.library.tracks.len(),
-        state.cfg.settings.min_size_kb,
+        effective_min_size_kb,
         if state.cfg.settings.shuffle {
             "on"
         } else {
@@ -231,6 +253,20 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn folder_min_size_marker_and_kb(
+    folder: &FolderEntry,
+    settings: &crate::config::SettingsConfig,
+) -> (&'static str, u64) {
+    let eff_kb = effective_min_size_kb_for_folder(folder, settings);
+    let min_kb = settings.min_size_custom_kb_min;
+    let max_kb = settings.min_size_custom_kb_max;
+    let marker = match folder.custom_min_size_kb {
+        Some(v) if (min_kb..=max_kb).contains(&v) => MIN_SIZE_MARKER_CUSTOM,
+        _ => MIN_SIZE_MARKER_GLOBAL,
+    };
+    (marker, eff_kb)
 }
 
 fn draw_now_playing(frame: &mut Frame, area: Rect, app: &TuiApp) {
@@ -412,7 +448,6 @@ mod tests {
             data_dir: data_dir.clone(),
             cache_dir: data_dir.join("cache"),
             logs_dir: data_dir.join("logs"),
-            playlists_dir: data_dir.join("playlists"),
             config_path: data_dir.join("config.yaml"),
             playlists_path: data_dir.join("playlists.yaml"),
             state_path: data_dir.join("state.yaml"),
@@ -451,6 +486,53 @@ mod tests {
     }
 
     #[test]
+    fn folder_min_size_marker_and_kb_uses_custom_marker_only_when_override_in_range() {
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = 100;
+        cfg.settings.min_size_bytes = 100 * 1024;
+        cfg.settings.min_size_custom_kb_min = 10;
+        cfg.settings.min_size_custom_kb_max = 10_000;
+
+        let folder_global = FolderEntry {
+            path: "C:\\Global".to_string(),
+            scan_depth: crate::config::ScanDepth::RootOnly,
+            custom_min_size_kb: None,
+        };
+        let folder_custom_ok = FolderEntry {
+            path: "C:\\CustomOk".to_string(),
+            scan_depth: crate::config::ScanDepth::RootOnly,
+            custom_min_size_kb: Some(222),
+        };
+        let folder_custom_low = FolderEntry {
+            path: "C:\\CustomLow".to_string(),
+            scan_depth: crate::config::ScanDepth::RootOnly,
+            custom_min_size_kb: Some(9),
+        };
+        let folder_custom_high = FolderEntry {
+            path: "C:\\CustomHigh".to_string(),
+            scan_depth: crate::config::ScanDepth::RootOnly,
+            custom_min_size_kb: Some(10_001),
+        };
+
+        assert_eq!(
+            folder_min_size_marker_and_kb(&folder_global, &cfg.settings),
+            (MIN_SIZE_MARKER_GLOBAL, 100)
+        );
+        assert_eq!(
+            folder_min_size_marker_and_kb(&folder_custom_ok, &cfg.settings),
+            (MIN_SIZE_MARKER_CUSTOM, 222)
+        );
+        assert_eq!(
+            folder_min_size_marker_and_kb(&folder_custom_low, &cfg.settings),
+            (MIN_SIZE_MARKER_GLOBAL, 100)
+        );
+        assert_eq!(
+            folder_min_size_marker_and_kb(&folder_custom_high, &cfg.settings),
+            (MIN_SIZE_MARKER_GLOBAL, 100)
+        );
+    }
+
+    #[test]
     fn main_menu_actions_lines_begin_with_digit_key_labels() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
@@ -471,7 +553,7 @@ mod tests {
         let expected_action_phrases = [
             "add folder",
             "remove selected folder",
-            "toggle root_only",
+            "cycle scan depth",
             "play",
             "settings",
             "playlists",
@@ -507,11 +589,13 @@ mod tests {
             folders: vec![
                 FolderEntry {
                     path: "C:\\Music".to_string(),
-                    root_only: true,
+                    scan_depth: crate::config::ScanDepth::RootOnly,
+                    custom_min_size_kb: None,
                 },
                 FolderEntry {
                     path: "C:\\Games".to_string(),
-                    root_only: false,
+                    scan_depth: crate::config::ScanDepth::Recursive,
+                    custom_min_size_kb: None,
                 },
             ],
             ..Default::default()
@@ -534,8 +618,8 @@ mod tests {
             .lines()
             .find(|l| l.contains("C:\\Music"))
             .expect("expected to render a line containing C:\\Music");
-        let expected_root_only = scan_mode_indicator_fixed(true);
-        let expected_recursive = scan_mode_indicator_fixed(false);
+        let expected_root_only = scan_depth_indicator_fixed(crate::config::ScanDepth::RootOnly);
+        let expected_recursive = scan_depth_indicator_fixed(crate::config::ScanDepth::Recursive);
         assert!(
             line_music.contains(expected_root_only.as_str())
                 && line_music.find(expected_root_only.as_str()) < line_music.find("C:\\Music"),
@@ -560,7 +644,7 @@ mod tests {
             "regression: root_only=false line must not contain root-only indicator; got: {line_games:?}"
         );
 
-        // Regression guard: every rendered folder row must contain exactly one of the two indicators.
+        // Regression guard: every rendered folder row must contain exactly one of the indicators.
         for (idx, folder) in folders.iter().enumerate() {
             let line = text
                 .lines()
@@ -568,16 +652,25 @@ mod tests {
                 .unwrap_or_else(|| {
                     panic!("expected to render a line containing {:?}", folder.path)
                 });
-            let want = scan_mode_indicator_fixed(folder.root_only);
-            let other = scan_mode_indicator_fixed(!folder.root_only);
+            let want = scan_depth_indicator_fixed(folder.scan_depth);
             assert!(
                 line.contains(want.as_str()),
                 "expected folder row {idx} to contain scan indicator {want:?}; got: {line:?}"
             );
-            assert!(
-                !line.contains(other.as_str()),
-                "regression: folder row {idx} must not contain the other indicator {other:?}; got: {line:?}"
-            );
+            for other_depth in [
+                crate::config::ScanDepth::RootOnly,
+                crate::config::ScanDepth::OneLevel,
+                crate::config::ScanDepth::Recursive,
+            ] {
+                if other_depth == folder.scan_depth {
+                    continue;
+                }
+                let other = scan_depth_indicator_fixed(other_depth);
+                assert!(
+                    !line.contains(other.as_str()),
+                    "regression: folder row {idx} must not contain other indicator {other:?}; got: {line:?}"
+                );
+            }
         }
     }
 
