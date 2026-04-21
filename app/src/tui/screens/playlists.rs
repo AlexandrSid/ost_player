@@ -105,6 +105,13 @@ impl PlaylistsScreen {
             KeyCode::Esc | KeyCode::Char('q') => Some(Action::Navigate(Screen::MainMenu)),
             KeyCode::Up => Some(Action::SelectPlaylistDelta(-1)),
             KeyCode::Down => Some(Action::SelectPlaylistDelta(1)),
+            KeyCode::Char('s') => {
+                if !state.playlists_dirty {
+                    Some(Action::SetStatus("no playlist changes to save".to_string()))
+                } else {
+                    Some(Action::SavePlaylists)
+                }
+            }
             KeyCode::Char('n') => {
                 self.create_input = Some(TextInput::new(
                     "Create playlist from current folders",

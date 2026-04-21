@@ -47,9 +47,11 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let state = &app.state;
     let v = app.main_menu.view(state);
 
+    let (menu_plain, menu_text) = main_menu_actions_block(&state.cfg, state.playlists_dirty);
+    let actions_col_width = main_menu_actions_col_width(area.width, menu_plain.as_str());
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+        .constraints([Constraint::Min(20), Constraint::Length(actions_col_width)].as_ref())
         .split(area);
 
     let active_playlist = state
@@ -95,9 +97,8 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
     }
     frame.render_stateful_widget(list, cols[0], &mut list_state);
 
-    let menu = main_menu_actions_block(&state.cfg);
     frame.render_widget(
-        Paragraph::new(menu)
+        Paragraph::new(menu_text)
             .block(Block::default().title("Actions").borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
         cols[1],
@@ -105,6 +106,8 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
 
     if let Some(input) = v.add_folder {
         draw_text_input_modal(frame, input);
+    } else if let Some(confirm) = v.confirm_quit {
+        draw_confirm_modal(frame, confirm);
     } else if let Some(confirm) = v.confirm_remove {
         draw_confirm_modal(frame, confirm);
     } else if let Some(input) = v.custom_min_size_input {
@@ -112,19 +115,18 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
     }
 }
 
-fn main_menu_actions_block(cfg: &crate::config::AppConfig) -> String {
+fn main_menu_actions_block(
+    cfg: &crate::config::AppConfig,
+    playlists_dirty: bool,
+) -> (String, Text<'static>) {
     use crate::config::MainMenuCommand;
 
     fn cmd_label_and_alpha_hint(cmd: MainMenuCommand) -> (&'static str, Option<&'static str>) {
         match cmd {
             MainMenuCommand::AddFolder => ("add folder", Some("a")),
-            MainMenuCommand::RemoveSelectedFolder => ("remove selected folder", Some("d")),
-            MainMenuCommand::CycleSelectedFolderScanDepth => {
-                ("cycle scan depth for selected folder", Some("t"))
-            }
-            MainMenuCommand::SetSelectedFolderCustomMinSizeKb => {
-                ("set custom min_size for selected folder", Some("c"))
-            }
+            MainMenuCommand::RemoveSelectedFolder => ("remove folder", Some("d")),
+            MainMenuCommand::CycleSelectedFolderScanDepth => ("cycle scan depth", Some("t")),
+            MainMenuCommand::SetSelectedFolderCustomMinSizeKb => ("set custom min_size", Some("c")),
             MainMenuCommand::Play => ("play", None),
             MainMenuCommand::Settings => ("settings", Some("s")),
             MainMenuCommand::Playlists => ("playlists", Some("p")),
@@ -132,49 +134,120 @@ fn main_menu_actions_block(cfg: &crate::config::AppConfig) -> String {
         }
     }
 
-    let mut lines: Vec<String> = Vec::new();
+    let mut plain_lines: Vec<String> = Vec::new();
+    let mut styled_lines: Vec<Line<'static>> = Vec::new();
+    let dirty_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::DIM);
 
     if let Some(map) = cfg.tui.resolved_main_menu_numeric_mapping() {
-        lines.push("Main menu (digits 1..9):".to_string());
+        plain_lines.push("Main menu (digits 1..9):".to_string());
+        styled_lines.push(Line::from("Main menu (digits 1..9):"));
         for (idx, cmd) in map.iter().enumerate() {
             let Some(cmd) = cmd else { continue };
+            if *cmd == MainMenuCommand::Play {
+                // Play is intentionally not part of the numeric mapping UI block.
+                continue;
+            }
             let key = (idx as u8) + 1;
             let (label, alpha) = cmd_label_and_alpha_hint(*cmd);
             let extra = match (*cmd, alpha) {
-                (MainMenuCommand::Play, _) => " / Enter / Space".to_string(),
                 (_, Some(ch)) => format!(" / {ch}"),
                 _ => "".to_string(),
             };
-            lines.push(format!("  {key}{extra}  {label}"));
+            if *cmd == MainMenuCommand::Playlists && playlists_dirty {
+                let base = format!("  {key}{extra}  {label}");
+                let hint = " (save changes)";
+                plain_lines.push(format!("{base}{hint}"));
+                styled_lines.push(Line::from(vec![
+                    Span::styled(base, dirty_style),
+                    Span::styled(hint, dirty_style),
+                ]));
+            } else {
+                let line = format!("  {key}{extra}  {label}");
+                plain_lines.push(line.clone());
+                styled_lines.push(Line::from(line));
+            }
         }
-        lines.push("  0 / q  exit".to_string());
     } else {
-        lines.extend([
-            "Main menu:".to_string(),
-            "  1 / a  add folder".to_string(),
-            "  2 / d  remove selected folder".to_string(),
-            "  3 / t  cycle scan depth for selected folder".to_string(),
-            "  4 / c  set custom min_size for selected folder".to_string(),
-            "  5 / Enter / Space  play".to_string(),
-            "  6 / s  settings".to_string(),
-            "  7 / p  playlists".to_string(),
-            "  8 / r  rescan library".to_string(),
-            "  0 / q  exit".to_string(),
-        ]);
+        let base_lines = [
+            "Main menu:",
+            "  1 / a  add folder",
+            "  2 / d  remove folder",
+            "  3 / t  cycle scan depth",
+            "  4 / c  set custom min_size",
+            "  6 / s  settings",
+            "  7 / p  playlists",
+            "  8 / r  rescan library",
+        ];
+        for l in base_lines {
+            if l.ends_with("playlists") && playlists_dirty {
+                let hint = " (save changes)";
+                plain_lines.push(format!("{l}{hint}"));
+                styled_lines.push(Line::from(vec![
+                    Span::styled(l.to_string(), dirty_style),
+                    Span::styled(hint, dirty_style),
+                ]));
+            } else {
+                plain_lines.push(l.to_string());
+                styled_lines.push(Line::from(l));
+            }
+        }
     }
 
-    lines.push("".to_string());
-    lines.push("Selection:".to_string());
-    lines.push("  Up/Down".to_string());
-    lines.join("\n")
+    plain_lines.push("".to_string());
+    styled_lines.push(Line::from(""));
+    plain_lines.push("Play / exit:".to_string());
+    styled_lines.push(Line::from("Play / exit:"));
+    let play_exit = [("Enter/Space", "play"), ("Esc/q", "exit")];
+    let key_width = play_exit.iter().map(|(k, _)| k.len()).max().unwrap_or(1);
+    for (k, label) in play_exit {
+        let line = format!("  {:<key_width$}  → {label}", k, key_width = key_width);
+        plain_lines.push(line.clone());
+        styled_lines.push(Line::from(line));
+    }
+
+    plain_lines.push("".to_string());
+    styled_lines.push(Line::from(""));
+    plain_lines.push("Selection:".to_string());
+    styled_lines.push(Line::from("Selection:"));
+    plain_lines.push("  Up/Down".to_string());
+    styled_lines.push(Line::from("  Up/Down"));
+
+    plain_lines.push("".to_string());
+    styled_lines.push(Line::from(""));
+    let hotkeys = playback_hotkeys_block(cfg);
+    for (idx, l) in hotkeys.lines().enumerate() {
+        plain_lines.push(l.to_string());
+        styled_lines.push(Line::from(l.to_string()));
+        if idx == hotkeys.lines().count().saturating_sub(1) {
+            // nothing
+        }
+    }
+
+    (plain_lines.join("\n"), Text::from(styled_lines))
+}
+
+fn main_menu_actions_col_width(area_width: u16, menu: &str) -> u16 {
+    // Keep the Actions column large enough to avoid wrapping its own content,
+    // but cap it so the folders list stays usable.
+    let longest = menu.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+
+    // `Block` borders consume 2 columns; ensure the inner width can fit the longest line.
+    let desired = longest.saturating_add(2);
+
+    // Cap to leave a reasonable minimum width for the folder list.
+    let max_allowed = area_width.saturating_sub(20).max(20);
+    desired.clamp(20, max_allowed)
 }
 
 fn draw_settings(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let state = &app.state;
     let v = app.settings.view();
 
+    let hotkeys = playback_hotkeys_block(&state.cfg);
     let text = format!(
-        "Settings:\n\n  min_size_kb: {}kb\n  shuffle: {}\n  repeat: {}\n\nKeys:\n  m  edit min_size_kb\n  s  toggle shuffle\n  r  cycle repeat\n  Esc/q  back",
+        "Settings:\n\n  min_size_kb: {}kb\n  shuffle: {}\n  repeat: {}\n\n{hotkeys}\n\nLocal:\n  m  edit min_size_kb\n  s  toggle shuffle\n  r  cycle repeat\n  Esc/q  back",
         state.cfg.settings.min_size_kb,
         if state.cfg.settings.shuffle { "on" } else { "off" },
         state.repeat_label(),
@@ -231,17 +304,15 @@ fn draw_playlists(frame: &mut Frame, area: Rect, app: &TuiApp) {
     }
     frame.render_stateful_widget(list, cols[0], &mut list_state);
 
-    let actions = [
-        "Keys:",
-        "  n  create (from current folders)",
-        "  Enter/l  load (swap folders)",
-        "  o  overwrite selected with current folders",
-        "  r  rename selected",
-        "  d  delete selected",
-        "  Up/Down  select",
-        "  Esc/q  back",
-    ]
-    .join("\n");
+    let hotkeys = playback_hotkeys_block(&state.cfg);
+    let save_label = if state.playlists_dirty {
+        "s  save playlists"
+    } else {
+        "s  save playlists (no changes)"
+    };
+    let actions = format!(
+        "{hotkeys}\n\nLocal:\n  {save_label}\n  n  create (from current folders)\n  Enter/l  load (swap folders)\n  o  overwrite selected with current folders\n  r  rename selected\n  d  delete selected\n  Up/Down  select\n  Esc/q  back"
+    );
     frame.render_widget(
         Paragraph::new(actions)
             .block(Block::default().title("Actions").borders(Borders::ALL))
@@ -261,7 +332,13 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let status = state.status.clone().unwrap_or_else(|| match state.screen {
         Screen::MainMenu => "Ready. Choose an action.".to_string(),
         Screen::Settings => "Settings are auto-saved.".to_string(),
-        Screen::Playlists => "Playlists are auto-saved.".to_string(),
+        Screen::Playlists => {
+            if state.playlists_dirty {
+                "Playlists changed (unsaved). Press s to save.".to_string()
+            } else {
+                "Playlists. Press s to save.".to_string()
+            }
+        }
         Screen::NowPlaying => "Now Playing.".to_string(),
         Screen::Folders => "Not implemented yet.".to_string(),
     });
@@ -382,28 +459,28 @@ fn tap_hold_hint(b: &Option<TapHoldBinding>) -> Option<String> {
     b.as_ref().map(hotkey_hints::format_tap_hold_binding)
 }
 
-fn now_playing_keys_block(state: &crate::tui::state::AppState) -> String {
-    let b = &state.cfg.hotkeys.bindings;
+fn playback_hotkeys_block(cfg: &crate::config::AppConfig) -> String {
+    let b = &cfg.hotkeys.bindings;
 
     // Keep a stable, aligned layout: `<keys>` column + two spaces + `<action>`.
-    let entries: [(&str, Option<String>); 6] = [
+    let entries: [(&str, Option<String>); 7] = [
         ("play/pause", chord_hint(&b.play_pause)),
         ("next", tap_hold_hint(&b.next)),
         ("previous", tap_hold_hint(&b.prev)),
         ("toggle shuffle", chord_hint(&b.shuffle_toggle)),
         ("cycle repeat", chord_hint(&b.repeat_toggle)),
-        ("stop", Some("x".to_string())),
+        ("volume up", chord_hint(&b.volume_up)),
+        ("volume down", chord_hint(&b.volume_down)),
     ];
 
     let key_width = entries
         .iter()
         .map(|(_, k)| chord_hint_or_unknown(k.clone()).len())
         .max()
-        .unwrap_or(1)
-        .max("Esc/q/m".len());
+        .unwrap_or(1);
 
     let mut out = String::new();
-    out.push_str("Keys:\n");
+    out.push_str("Hotkeys:\n");
     for (label, key) in entries {
         let key = chord_hint_or_unknown(key);
         out.push_str(&format!(
@@ -412,12 +489,26 @@ fn now_playing_keys_block(state: &crate::tui::state::AppState) -> String {
             key_width = key_width
         ));
     }
-    out.push_str(&format!(
-        "  {:<key_width$}  back to main menu",
-        "Esc/q/m",
-        key_width = key_width
-    ));
-    out
+    out.trim_end().to_string()
+}
+
+fn now_playing_keys_block(state: &crate::tui::state::AppState) -> String {
+    let mut out = String::new();
+    out.push_str(&playback_hotkeys_block(&state.cfg));
+    out.push('\n');
+    out.push('\n');
+
+    let local = [("x", "stop"), ("Esc/q/m", "back to main menu")];
+    let key_width = local.iter().map(|(k, _)| k.len()).max().unwrap_or(1);
+    out.push_str("Local:\n");
+    for (k, label) in local {
+        out.push_str(&format!(
+            "  {:<key_width$}  {label}\n",
+            k,
+            key_width = key_width
+        ));
+    }
+    out.trim_end().to_string()
 }
 
 fn format_duration(d: std::time::Duration) -> String {
@@ -661,13 +752,11 @@ mod tests {
         // - Do not assert exact spacing or box borders.
         let expected_action_phrases = [
             "add folder",
-            "remove selected folder",
+            "remove folder",
             "cycle scan depth",
-            "play",
             "settings",
             "playlists",
             "rescan library",
-            "exit",
         ];
 
         for phrase in expected_action_phrases {
@@ -677,24 +766,41 @@ mod tests {
                 .unwrap_or_else(|| {
                     panic!("expected to render an Actions line containing {phrase:?}")
                 });
-            let first = line
-                .chars()
-                .find(|c| c.is_ascii_digit())
-                .unwrap_or_else(|| {
-                    panic!("expected action line for {phrase:?} to contain a digit; got: {line:?}")
-                });
+            let trimmed = line.trim_start_matches(|c: char| c.is_whitespace() || c == '│');
+            let first = trimmed.chars().next().unwrap_or_else(|| {
+                panic!("expected action line for {phrase:?} to be non-empty; got: {line:?}")
+            });
             assert!(
                 first.is_ascii_digit(),
                 "expected action line for {phrase:?} to begin with a digit after trimming; got: {line:?}"
             );
         }
+
+        // Play/exit are intentionally not part of the numeric block.
+        let play_line = text
+            .lines()
+            .find(|l| l.contains("Enter/Space") && l.contains("→ play"))
+            .expect("expected play hint line to be rendered");
+        assert!(
+            play_line.chars().all(|c| !c.is_ascii_digit()),
+            "expected play hint line to have no digits; got: {play_line:?}"
+        );
+
+        let exit_line = text
+            .lines()
+            .find(|l| l.contains("Esc/q") && l.contains("→ exit"))
+            .expect("expected exit hint line to be rendered");
+        assert!(
+            exit_line.chars().all(|c| !c.is_ascii_digit()),
+            "expected exit hint line to have no digits; got: {exit_line:?}"
+        );
     }
 
     #[test]
     fn main_menu_actions_block_uses_legacy_default_layout_when_numeric_mapping_is_absent() {
         let cfg = AppConfig::default();
 
-        let s = main_menu_actions_block(&cfg);
+        let (s, _text) = main_menu_actions_block(&cfg, false);
         assert!(
             s.contains("Main menu:\n"),
             "expected legacy main menu header when mapping is absent; got:\n{s}"
@@ -706,6 +812,46 @@ mod tests {
         assert!(
             s.contains("  7 / p  playlists"),
             "expected legacy digit mapping line for '7' when mapping is absent; got:\n{s}"
+        );
+        assert!(
+            s.contains("Play / exit:\n"),
+            "expected Play / exit block to be present; got:\n{s}"
+        );
+        assert!(
+            s.contains("Enter/Space") && s.contains("→ play"),
+            "expected Play hint line; got:\n{s}"
+        );
+        assert!(
+            s.contains("Esc/q") && s.contains("→ exit"),
+            "expected Exit hint line; got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn main_menu_actions_block_marks_playlists_as_save_changes_when_dirty() {
+        // Legacy (no numeric mapping)
+        let cfg = AppConfig::default();
+        let (s, _text) = main_menu_actions_block(&cfg, true);
+        assert!(
+            s.contains("playlists (save changes)"),
+            "expected dirty hint suffix for playlists in legacy layout; got:\n{s}"
+        );
+
+        // Mapped numeric layout
+        let cfg = AppConfig {
+            tui: TuiConfig {
+                main_menu_numeric_mapping: Some(vec![MainMenuNumericBinding {
+                    key: 1,
+                    command: MainMenuCommand::Playlists,
+                }]),
+                extra: Default::default(),
+            },
+            ..Default::default()
+        };
+        let (s2, _text2) = main_menu_actions_block(&cfg, true);
+        assert!(
+            s2.contains("playlists (save changes)"),
+            "expected dirty hint suffix for playlists in mapped layout; got:\n{s2}"
         );
     }
 
@@ -1077,6 +1223,94 @@ mod tests {
     }
 
     #[test]
+    fn playback_hotkeys_block_uses_hotkeys_bindings_from_config() {
+        let mut cfg = AppConfig::default();
+        cfg.hotkeys.bindings.play_pause = Some(HotkeyChord {
+            modifiers: vec![HotkeyModifier::Ctrl],
+            key: HotkeyKey::Space,
+        });
+        cfg.hotkeys.bindings.next = Some(TapHoldBinding {
+            chord: HotkeyChord {
+                modifiers: vec![HotkeyModifier::Alt],
+                key: HotkeyKey::Right,
+            },
+            hold: None,
+        });
+        cfg.hotkeys.bindings.prev = Some(TapHoldBinding {
+            chord: HotkeyChord {
+                modifiers: vec![HotkeyModifier::Shift],
+                key: HotkeyKey::Left,
+            },
+            hold: None,
+        });
+        cfg.hotkeys.bindings.shuffle_toggle = Some(HotkeyChord {
+            modifiers: vec![],
+            key: HotkeyKey::S,
+        });
+
+        let s = playback_hotkeys_block(&cfg);
+        assert!(
+            s.contains("Hotkeys:\n"),
+            "expected hotkeys header; got:\n{s}"
+        );
+        assert!(
+            s.contains("Ctrl+Space") && s.contains("play/pause"),
+            "expected play/pause hint to include configured chord; got:\n{s}"
+        );
+        assert!(
+            s.contains("Alt+Right") && s.contains("next"),
+            "expected next hint to include configured tap/hold binding; got:\n{s}"
+        );
+        assert!(
+            s.contains("Shift+Left") && s.contains("previous"),
+            "expected previous hint to include configured tap/hold binding; got:\n{s}"
+        );
+        assert!(
+            s.contains("\n  S") && s.contains("toggle shuffle"),
+            "expected shuffle hint to include configured chord; got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn playback_hotkeys_block_renders_unknown_placeholder_for_missing_bindings() {
+        let mut cfg = AppConfig::default();
+        cfg.hotkeys.bindings.play_pause = None; // chord-based
+        cfg.hotkeys.bindings.next = None; // tap/hold-based
+        cfg.hotkeys.bindings.prev = None; // tap/hold-based
+        cfg.hotkeys.bindings.shuffle_toggle = None; // chord-based
+        cfg.hotkeys.bindings.repeat_toggle = None; // chord-based
+        cfg.hotkeys.bindings.volume_up = None; // chord-based
+        cfg.hotkeys.bindings.volume_down = None; // chord-based
+
+        let s = playback_hotkeys_block(&cfg);
+        assert!(
+            s.contains("Hotkeys:\n"),
+            "expected hotkeys header; got:\n{s}"
+        );
+
+        let expected_labels = [
+            "play/pause",
+            "next",
+            "previous",
+            "toggle shuffle",
+            "cycle repeat",
+            "volume up",
+            "volume down",
+        ];
+        for label in expected_labels {
+            let line = s.lines().find(|l| l.contains(label)).unwrap_or_else(|| {
+                panic!("expected a hotkeys line containing {label:?}; got:\n{s}")
+            });
+            // Stable check: after trimming indentation, the key hint should be '?'.
+            let trimmed = line.trim_start();
+            assert!(
+                trimmed.starts_with('?') || trimmed.starts_with("? "),
+                "expected missing binding for {label:?} to render '?' placeholder; got line: {line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn main_menu_actions_render_in_digit_order_when_numeric_mapping_present() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
@@ -1134,7 +1368,7 @@ mod tests {
             ..Default::default()
         };
 
-        let s = main_menu_actions_block(&cfg);
+        let (s, _text) = main_menu_actions_block(&cfg, false);
         assert!(
             s.contains("Main menu (digits 1..9):\n"),
             "expected mapped main menu header when mapping is present; got:\n{s}"
@@ -1146,6 +1380,40 @@ mod tests {
         assert!(
             !s.contains("  1 / a  add folder"),
             "regression: legacy hardcoded '1 / a add folder' must not appear when mapping is present; got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn main_menu_actions_col_width_clamps_to_available_space_and_min_width() {
+        // Use a simple menu with one very long line.
+        let menu = ["Actions:", "  very-very-very-very-very-very-long-line"].join("\n");
+
+        // Small-ish terminal: cap should keep at least 20 columns for the left list.
+        let w_small = main_menu_actions_col_width(60, menu.as_str());
+        assert!(
+            w_small >= 20,
+            "expected actions col width to be at least 20; got {w_small}"
+        );
+        assert!(
+            w_small <= 40,
+            "expected actions col width to leave >=20 cols for list; got {w_small}"
+        );
+
+        // Large terminal: should be able to fit the longest line + borders (2),
+        // but still not exceed the computed max_allowed.
+        let longest = menu.lines().map(|l| l.chars().count()).max().unwrap() as u16;
+        let desired = longest.saturating_add(2);
+        let area_width: u16 = 200;
+        let max_allowed = area_width.saturating_sub(20).max(20);
+        let w_large = main_menu_actions_col_width(area_width, menu.as_str());
+        assert!(
+            w_large >= 20 && w_large <= max_allowed,
+            "expected clamped width within [20, {max_allowed}]; got {w_large}"
+        );
+        assert_eq!(
+            w_large,
+            desired.clamp(20, max_allowed),
+            "expected width to match clamp(desired, max_allowed)"
         );
     }
 }

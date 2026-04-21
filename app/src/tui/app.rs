@@ -1,6 +1,6 @@
 use crate::config::{self, effective_min_size_kb_for_folder, FolderEntry, RepeatMode, ScanDepth};
 use crate::error::{AppError, AppResult};
-use crate::indexer::{self, FolderScanEntry, ScanOptions};
+use crate::indexer::{self, FolderScanEntry, LibraryIndex, ScanOptions};
 use crate::player::{PlayerCommand, PlayerEvent, PlayerHandle};
 use crate::playlists::{self, Playlist};
 use crate::state as app_state_file;
@@ -8,13 +8,14 @@ use crate::tui::action::{Action, Screen};
 use crate::tui::screens::{MainMenuScreen, NowPlayingScreen, PlaylistsScreen, SettingsScreen};
 use crate::tui::state::{AppState, PlaybackSource};
 use crate::{config::AppConfig, paths::AppPaths, playlists::PlaylistsFile};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-#[cfg(test)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub trait Persistence {
     fn save_config(&self, paths: &AppPaths, cfg: &AppConfig) -> AppResult<()>;
@@ -42,9 +43,12 @@ pub struct TuiApp {
     pub(crate) now_playing: NowPlayingScreen,
     persistence: Box<dyn Persistence>,
     player: Option<PlayerHandle>,
+    rng: StdRng,
     scan_spawner: Box<dyn ScanSpawner>,
     scan_job: Option<ScanJobState>,
     pending_scan: Option<ScanRequest>,
+    debounced_scan: Option<DebouncedScan>,
+    latest_bg_scan_token: u64,
     pending_play_from_library: Option<usize>,
     #[cfg(test)]
     load_queue_commands_sent: usize,
@@ -55,7 +59,20 @@ fn library_tracks_to_paths(library: &crate::indexer::LibraryIndex) -> Vec<std::p
 }
 
 fn find_track_index_by_path(tracks: &[PathBuf], needle: &PathBuf) -> Option<usize> {
-    tracks.iter().position(|p| p == needle)
+    // Fast path: byte-for-byte `PathBuf` equality.
+    if let Some(idx) = tracks.iter().position(|p| p == needle) {
+        return Some(idx);
+    }
+
+    // Slow path: compare canonicalized paths. This helps on Windows when one side includes a
+    // verbatim prefix (\\?\) or different normalization, but still points to the same file.
+    let needle_can = std::fs::canonicalize(needle).ok()?;
+    tracks.iter().position(|p| {
+        if p == needle {
+            return true;
+        }
+        std::fs::canonicalize(p).ok().as_ref() == Some(&needle_can)
+    })
 }
 
 fn clamp_start_index(start_index: usize, tracks_len: usize) -> usize {
@@ -71,6 +88,7 @@ enum ScanOrigin {
     RescanLibrary,
     PlayFromLibrary { start_index: usize },
     LoadPlaylist { stopped_playback: bool },
+    BackgroundRescan { token: u64 },
 }
 
 #[derive(Debug)]
@@ -87,6 +105,12 @@ struct ScanJobState {
     started_at: Instant,
     rx: mpsc::Receiver<crate::indexer::LibraryIndex>,
     handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct DebouncedScan {
+    due_at: Instant,
+    req: ScanRequest,
 }
 
 trait ScanSpawner {
@@ -144,6 +168,7 @@ impl TuiApp {
             cfg.settings.repeat,
             cfg.audio.volume_default_percent,
         );
+        let rng = StdRng::from_entropy();
         let mut state = AppState::new(paths, cfg, pls, cached);
         state.player.shuffle = state.cfg.settings.shuffle;
         state.player.repeat = state.cfg.settings.repeat;
@@ -155,18 +180,35 @@ impl TuiApp {
             now_playing: NowPlayingScreen,
             persistence,
             player: Some(player),
+            rng,
             scan_spawner,
             scan_job: None,
             pending_scan: None,
+            debounced_scan: None,
+            latest_bg_scan_token: 0,
             pending_play_from_library: None,
             #[cfg(test)]
             load_queue_commands_sent: 0,
         }
     }
 
+    fn random_start_index(&mut self, tracks_len: usize) -> usize {
+        if tracks_len == 0 {
+            0
+        } else {
+            self.rng.gen_range(0..tracks_len)
+        }
+    }
+
+    #[cfg(test)]
+    fn set_rng_seed_for_test(&mut self, seed: u64) {
+        self.rng = StdRng::seed_from_u64(seed);
+    }
+
     pub fn tick(&mut self) -> AppResult<Option<Action>> {
         self.drain_player_events();
         self.poll_scan_job_completion();
+        self.maybe_start_debounced_scan();
         match self.state.screen {
             Screen::MainMenu => self.main_menu.on_tick(&self.state),
             Screen::Settings => self.settings.on_tick(&self.state),
@@ -196,6 +238,31 @@ impl TuiApp {
             Screen::NowPlaying => self.now_playing.on_paste(&self.state, text),
             Screen::Folders => Ok(None),
         }
+    }
+
+    fn schedule_debounced_background_rescan(&mut self) -> AppResult<()> {
+        if self.state.cfg.folders.is_empty() {
+            return Ok(());
+        }
+        self.latest_bg_scan_token = self.latest_bg_scan_token.wrapping_add(1);
+        let token = self.latest_bg_scan_token;
+        let req = self.active_folders_scan_request(ScanOrigin::BackgroundRescan { token })?;
+
+        // Debounce to absorb bursts of folder edits.
+        let due_at = Instant::now() + Duration::from_millis(200);
+        self.debounced_scan = Some(DebouncedScan { due_at, req });
+        Ok(())
+    }
+
+    fn maybe_start_debounced_scan(&mut self) {
+        let Some(pending) = self.debounced_scan.as_ref() else {
+            return;
+        };
+        if Instant::now() < pending.due_at {
+            return;
+        }
+        let DebouncedScan { req, .. } = self.debounced_scan.take().expect("checked above");
+        self.request_scan(req);
     }
 
     pub fn apply(&mut self, action: Action) -> AppResult<()> {
@@ -261,8 +328,9 @@ impl TuiApp {
                 self.state.cfg = self.state.cfg.clone().normalized();
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
-                tracing::info!(path = %trimmed, "folder added");
+                tracing::info!(target: crate::logging::PERSIST_LOG_TARGET, path = %trimmed, "folder added");
                 self.state.status = Some("folder added and saved".to_string());
+                self.schedule_debounced_background_rescan()?;
             }
             Action::RemoveFolderAt(idx) => {
                 if idx >= self.state.cfg.folders.len() {
@@ -277,8 +345,9 @@ impl TuiApp {
                     self.state.main_selected_folder =
                         self.state.cfg.folders.len().saturating_sub(1);
                 }
-                tracing::info!(path = %removed, "folder removed");
+                tracing::info!(target: crate::logging::PERSIST_LOG_TARGET, path = %removed, "folder removed");
                 self.state.status = Some("folder removed and saved".to_string());
+                self.schedule_debounced_background_rescan()?;
             }
             Action::ToggleFolderRootOnlyAt(idx) => {
                 let (path, new_depth) = {
@@ -297,8 +366,14 @@ impl TuiApp {
                     ScanDepth::OneLevel => "one-level",
                     ScanDepth::Recursive => "recursive",
                 };
-                tracing::info!(path = %path, scan_depth = ?new_depth, "folder setting changed");
+                tracing::info!(
+                    target: crate::logging::PERSIST_LOG_TARGET,
+                    path = %path,
+                    scan_depth = ?new_depth,
+                    "folder setting changed"
+                );
                 self.state.status = Some(format!("scan depth: {label}"));
+                self.schedule_debounced_background_rescan()?;
             }
             Action::SetFolderCustomMinSizeKb { idx, custom_kb } => {
                 let (min, max) = (
@@ -339,11 +414,13 @@ impl TuiApp {
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
                 tracing::info!(
+                    target: crate::logging::PERSIST_LOG_TARGET,
                     path = %path,
                     custom_min_size_kb = ?next_val,
                     "folder setting changed"
                 );
                 self.state.status = Some("settings saved".to_string());
+                self.schedule_debounced_background_rescan()?;
             }
             Action::SetMinSizeKb(v) => {
                 let bytes = match v.checked_mul(1024) {
@@ -357,14 +434,19 @@ impl TuiApp {
                 self.state.cfg.settings.min_size_bytes = bytes;
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
-                tracing::info!(min_size_kb = v, "setting changed");
+                tracing::info!(target: crate::logging::PERSIST_LOG_TARGET, min_size_kb = v, "setting changed");
                 self.state.status = Some("settings saved".to_string());
+                self.schedule_debounced_background_rescan()?;
             }
             Action::ToggleShuffle => {
                 self.state.cfg.settings.shuffle = !self.state.cfg.settings.shuffle;
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
-                tracing::info!(shuffle = self.state.cfg.settings.shuffle, "setting changed");
+                tracing::info!(
+                    target: crate::logging::PERSIST_LOG_TARGET,
+                    shuffle = self.state.cfg.settings.shuffle,
+                    "setting changed"
+                );
                 self.state.status = Some("settings saved".to_string());
                 if let Some(p) = self.player.as_ref() {
                     p.send(PlayerCommand::SetShuffle(self.state.cfg.settings.shuffle));
@@ -378,7 +460,11 @@ impl TuiApp {
                 };
                 self.persistence
                     .save_config(&self.state.paths, &self.state.cfg)?;
-                tracing::info!(repeat = ?self.state.cfg.settings.repeat, "setting changed");
+                tracing::info!(
+                    target: crate::logging::PERSIST_LOG_TARGET,
+                    repeat = ?self.state.cfg.settings.repeat,
+                    "setting changed"
+                );
                 self.state.status = Some("settings saved".to_string());
                 if let Some(p) = self.player.as_ref() {
                     p.send(PlayerCommand::SetRepeat(self.state.cfg.settings.repeat));
@@ -391,8 +477,57 @@ impl TuiApp {
                     return Ok(());
                 }
 
+                // NP-001: Guard: if the requested source matches the currently playing/paused
+                // source, only navigate to Now Playing (no scan, no queue reload).
+                let is_playing_or_paused =
+                    self.state.player.status != crate::player::PlaybackStatus::Stopped;
+                let requested_source = PlaybackSource::from_active_playlist_or_folders(
+                    self.state.playlists.active.as_deref(),
+                    &self.state.cfg.folders,
+                );
+                if is_playing_or_paused
+                    && self.state.playback_source.as_ref() == Some(&requested_source)
+                {
+                    self.state.screen = Screen::NowPlaying;
+                    self.state.status = None;
+                    return Ok(());
+                }
+
                 // FIX-004: Always rescan ACTIVE folders before building the queue, to avoid
                 // enqueueing stale tracks after folder changes.
+                let desired_fp = crate::indexer::compute_index_fingerprint(
+                    &self
+                        .state
+                        .cfg
+                        .folders
+                        .iter()
+                        .map(|f| {
+                            let eff_kb =
+                                effective_min_size_kb_for_folder(f, &self.state.cfg.settings);
+                            let min_size_bytes = eff_kb.saturating_mul(1024);
+                            FolderScanEntry {
+                                path: f.path.clone(),
+                                scan_depth: f.scan_depth,
+                                min_size_bytes,
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                    &ScanOptions {
+                        supported_extensions: self.state.cfg.settings.supported_extensions.clone(),
+                        min_size_bytes: self.state.cfg.settings.min_size_kb.saturating_mul(1024),
+                        allow_name_size_fallback_dedup: true,
+                        force_canonicalize_fail: false,
+                    },
+                );
+                if self.scan_job.is_none()
+                    && !self.state.library.tracks.is_empty()
+                    && self.state.library.schema_version == LibraryIndex::SCHEMA_VERSION
+                    && self.state.library.index_fingerprint == desired_fp
+                {
+                    // Index inputs match; reuse immediately without blocking on a scan.
+                    self.load_queue_from_current_library(start_index);
+                    return Ok(());
+                }
                 if self.scan_job.is_some() {
                     // Do not start a second scan; mark play pending and complete it right after
                     // the current scan finishes.
@@ -465,6 +600,17 @@ impl TuiApp {
                 self.poll_scan_job_completion();
             }
 
+            Action::SavePlaylists => {
+                self.persistence
+                    .save_playlists(&self.state.paths, &self.state.playlists)?;
+                self.state.playlists_dirty = false;
+                tracing::info!(
+                    target: crate::logging::PERSIST_LOG_TARGET,
+                    "playlists saved"
+                );
+                self.state.status = Some("playlists saved".to_string());
+            }
+
             Action::CreatePlaylist { name } => {
                 let name = name.trim();
                 if name.is_empty() {
@@ -481,10 +627,9 @@ impl TuiApp {
                 p.validate()
                     .map_err(|msg| AppError::Config { message: msg })?;
                 self.state.playlists.playlists.push(p);
-                self.persistence
-                    .save_playlists(&self.state.paths, &self.state.playlists)?;
-                tracing::info!(playlist_name = %name, "playlist created");
-                self.state.status = Some("playlist created and saved".to_string());
+                self.state.playlists_dirty = true;
+                tracing::debug!(playlist_name = %name, "playlist created (unsaved)");
+                self.state.status = Some("playlist created (unsaved)".to_string());
             }
             Action::RenamePlaylist { idx, name } => {
                 let name = name.trim();
@@ -497,10 +642,9 @@ impl TuiApp {
                     p.name = name.to_string();
                     p.validate()
                         .map_err(|msg| AppError::Config { message: msg })?;
-                    self.persistence
-                        .save_playlists(&self.state.paths, &self.state.playlists)?;
-                    tracing::info!(from = %old, to = %name, "playlist renamed");
-                    self.state.status = Some("playlist renamed and saved".to_string());
+                    self.state.playlists_dirty = true;
+                    tracing::debug!(from = %old, to = %name, "playlist renamed (unsaved)");
+                    self.state.status = Some("playlist renamed (unsaved)".to_string());
                 }
             }
             Action::DeletePlaylist { idx } => {
@@ -513,10 +657,13 @@ impl TuiApp {
                 if self.state.playlists.active.as_deref() == Some(deleted_id.as_str()) {
                     self.state.playlists.active = None;
                 }
-                self.persistence
-                    .save_playlists(&self.state.paths, &self.state.playlists)?;
-                tracing::info!(playlist_id = %deleted_id, playlist_name = %deleted_name, "playlist deleted");
-                self.state.status = Some("playlist deleted and saved".to_string());
+                self.state.playlists_dirty = true;
+                tracing::debug!(
+                    playlist_id = %deleted_id,
+                    playlist_name = %deleted_name,
+                    "playlist deleted (unsaved)"
+                );
+                self.state.status = Some("playlist deleted (unsaved)".to_string());
                 if self.state.playlists_selected >= self.state.playlists.playlists.len() {
                     self.state.playlists_selected =
                         self.state.playlists.playlists.len().saturating_sub(1);
@@ -529,10 +676,13 @@ impl TuiApp {
                 p.folders = self.state.cfg.folders.clone();
                 let (playlist_id, playlist_name) = (p.id.clone(), p.name.clone());
                 let _ = p; // end mutable borrow before immutable borrow below
-                self.persistence
-                    .save_playlists(&self.state.paths, &self.state.playlists)?;
-                tracing::info!(playlist_id = %playlist_id, playlist_name = %playlist_name, "playlist overwritten");
-                self.state.status = Some("playlist overwritten and saved".to_string());
+                self.state.playlists_dirty = true;
+                tracing::debug!(
+                    playlist_id = %playlist_id,
+                    playlist_name = %playlist_name,
+                    "playlist overwritten (unsaved)"
+                );
+                self.state.status = Some("playlist overwritten (unsaved)".to_string());
             }
             Action::LoadPlaylist { idx } => {
                 if let Some(p) = self.state.playlists.playlists.get(idx) {
@@ -566,13 +716,12 @@ impl TuiApp {
                     self.persistence
                         .save_config(&self.state.paths, &self.state.cfg)?;
                     self.state.playlists.active = Some(p.id.clone());
-                    self.persistence
-                        .save_playlists(&self.state.paths, &self.state.playlists)?;
-                    tracing::info!(
+                    self.state.playlists_dirty = true;
+                    tracing::debug!(
                         playlist_id = %p.id,
                         playlist_name = %p.name,
                         stopped_playback,
-                        "playlist loaded"
+                        "playlist loaded (unsaved)"
                     );
 
                     // Proactively rescan so the library/queue view matches the newly active playlist.
@@ -701,6 +850,17 @@ impl TuiApp {
                 if let Some(h) = job.handle.take() {
                     let _ = h.join();
                 }
+                // Background scans can be superseded by newer debounced changes; ignore stale
+                // completion results so they don't overwrite newer state.
+                if let ScanOrigin::BackgroundRescan { token } = job.origin {
+                    if token != self.latest_bg_scan_token {
+                        // Join already happened above; just continue to next pending scan.
+                        if let Some(req) = self.pending_scan.take() {
+                            self.request_scan(req);
+                        }
+                        return;
+                    }
+                }
                 self.apply_scan_result(job.origin, index);
 
                 // FIX-004: If Play was requested during an active scan, complete it immediately
@@ -740,7 +900,11 @@ impl TuiApp {
 
         // Best-effort cache persistence under data/cache/.
         if let Err(e) = indexer::io::save(&self.state.paths, index) {
-            tracing::warn!(error = %e, "failed to persist index cache");
+            tracing::warn!(
+                target: crate::logging::PERSIST_LOG_TARGET,
+                error = %e,
+                "failed to persist index cache"
+            );
         }
         // Best-effort runtime state tracking under data/state.yaml.
         if let Ok(mut st) = app_state_file::load_or_create(&self.state.paths) {
@@ -749,7 +913,11 @@ impl TuiApp {
                 issues_total: issues,
             });
             if let Err(e) = app_state_file::save(&self.state.paths, &st) {
-                tracing::warn!(error = %e, "failed to persist state.yaml");
+                tracing::warn!(
+                    target: crate::logging::PERSIST_LOG_TARGET,
+                    error = %e,
+                    "failed to persist state.yaml"
+                );
             }
         }
     }
@@ -788,13 +956,35 @@ impl TuiApp {
                         return;
                     }
 
-                    let start_index = self
-                        .state
-                        .player
-                        .current_path
+                    let current_path = self.state.player.current_path.clone();
+                    let current_index = current_path
                         .as_ref()
-                        .and_then(|cur| find_track_index_by_path(&new_tracks, cur))
-                        .unwrap_or(0);
+                        .and_then(|cur| find_track_index_by_path(&new_tracks, cur));
+
+                    if let (Some(_cur_path), Some(idx)) = (current_path, current_index) {
+                        let selected_current_path = new_tracks[idx].clone();
+                        if let Some(p) = self.player.as_ref() {
+                            p.send(PlayerCommand::ResyncQueueAfterLibraryChange {
+                                tracks: new_tracks,
+                                // Use the exact refreshed-library `PathBuf` to avoid Windows
+                                // normalization differences causing strict equality mismatches
+                                // in the player.
+                                current_path: selected_current_path,
+                            });
+                        }
+                        self.state.status = Some(
+                            "scan complete: queue resynced (preserved current track)".to_string(),
+                        );
+                        return;
+                    }
+
+                    // Current file no longer exists: fall back to reloading a new queue.
+                    // Spec: shuffle off → start at 0; shuffle on → uniform random index.
+                    let start_index = if self.state.cfg.settings.shuffle {
+                        self.random_start_index(new_tracks.len())
+                    } else {
+                        0
+                    };
                     let safe_start = clamp_start_index(start_index, new_tracks.len());
                     if let Some(p) = self.player.as_ref() {
                         #[cfg(test)]
@@ -806,9 +996,7 @@ impl TuiApp {
                             start_index: safe_start,
                         });
                     }
-                    self.state.status = Some(
-                        "scan complete: queue refreshed (restarted current track)".to_string(),
-                    );
+                    self.state.status = Some("scan complete: queue refreshed".to_string());
                 }
             }
             ScanOrigin::PlayFromLibrary { start_index } => {
@@ -834,6 +1022,9 @@ impl TuiApp {
                         "playlist loaded{stopped_suffix}; scan: {tracks} tracks (issues: {issues})"
                     ));
                 }
+            }
+            ScanOrigin::BackgroundRescan { token: _ } => {
+                // Quiet refresh: keep UI responsive; status is left unchanged.
             }
         }
     }
@@ -1271,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn create_playlist_saves_playlists_and_copies_current_folders() {
+    fn create_playlist_marks_dirty_and_copies_current_folders() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
         let mut cfg = AppConfig::default();
@@ -1287,7 +1478,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(mock.playlists_writes(), 1);
+        assert_eq!(mock.playlists_writes(), 0);
         assert_eq!(app.state.playlists.playlists.len(), 1);
         assert_eq!(app.state.playlists.playlists[0].name, "My Mix");
         assert_eq!(
@@ -1297,18 +1488,11 @@ mod tests {
                 FolderEntry::new("B".to_string())
             ]
         );
-        assert_eq!(
-            mock.last_saved_playlists
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .playlists
-                .len(),
-            1
-        );
+        assert!(app.state.playlists_dirty);
+        assert!(mock.last_saved_playlists.borrow().is_none());
         assert_eq!(
             app.state.status.as_deref(),
-            Some("playlist created and saved")
+            Some("playlist created (unsaved)")
         );
     }
 
@@ -1333,10 +1517,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(app.state.playlists.playlists[0].name, "New");
-        assert_eq!(mock.playlists_writes(), 1);
+        assert_eq!(mock.playlists_writes(), 0);
+        assert!(app.state.playlists_dirty);
         assert_eq!(
             app.state.status.as_deref(),
-            Some("playlist renamed and saved")
+            Some("playlist renamed (unsaved)")
         );
     }
 
@@ -1358,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_playlist_clears_active_and_saves() {
+    fn delete_playlist_clears_active_and_marks_dirty() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
         let cfg = AppConfig::default();
@@ -1381,14 +1566,70 @@ mod tests {
 
         app.apply(Action::DeletePlaylist { idx: 0 }).unwrap();
 
-        assert_eq!(mock.playlists_writes(), 1);
+        assert_eq!(mock.playlists_writes(), 0);
         assert_eq!(app.state.playlists.playlists.len(), 1);
         assert_eq!(app.state.playlists.active, None);
+        assert!(app.state.playlists_dirty);
         assert_eq!(
             app.state.status.as_deref(),
-            Some("playlist deleted and saved")
+            Some("playlist deleted (unsaved)")
         );
         assert_eq!(app.state.playlists_selected, 0);
+    }
+
+    #[test]
+    fn save_playlists_persists_and_clears_dirty_flag() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let cfg = AppConfig::default();
+        let pls = PlaylistsFile::default();
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+
+        app.apply(Action::CreatePlaylist {
+            name: "Mix".to_string(),
+        })
+        .unwrap();
+        assert!(
+            app.state.playlists_dirty,
+            "setup: playlist mutation should set dirty"
+        );
+        assert_eq!(mock.playlists_writes(), 0, "no autosave on mutation");
+
+        app.apply(Action::SavePlaylists).unwrap();
+
+        assert_eq!(
+            mock.playlists_writes(),
+            1,
+            "explicit save should persist once"
+        );
+        assert!(!app.state.playlists_dirty, "save should clear dirty");
+        assert_eq!(app.state.status.as_deref(), Some("playlists saved"));
+        assert!(mock.last_saved_playlists.borrow().is_some());
+    }
+
+    #[test]
+    fn tick_does_not_autosave_playlists_when_dirty() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let cfg = AppConfig::default();
+        let pls = PlaylistsFile::default();
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+
+        app.apply(Action::CreatePlaylist {
+            name: "Mix".to_string(),
+        })
+        .unwrap();
+        assert!(app.state.playlists_dirty);
+        let before = mock.playlists_writes();
+
+        // Regression guard: no autosave on tick/draw loop.
+        let _ = app.tick().unwrap();
+
+        assert_eq!(
+            mock.playlists_writes(),
+            before,
+            "tick must not persist playlists automatically"
+        );
     }
 
     #[test]
@@ -1412,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn load_playlist_swaps_folders_sets_active_and_saves_both() {
+    fn load_playlist_swaps_folders_sets_active_and_saves_config_only() {
         let td = tempfile::tempdir().unwrap();
         let paths = paths_for(td.path());
         let mut cfg = AppConfig::default();
@@ -1452,7 +1693,8 @@ mod tests {
         );
         assert_eq!(app.state.playlists.active.as_deref(), Some("p1"));
         assert_eq!(mock.config_writes(), 1);
-        assert_eq!(mock.playlists_writes(), 1);
+        assert_eq!(mock.playlists_writes(), 0);
+        assert!(app.state.playlists_dirty);
         assert_eq!(
             app.state.status.as_deref(),
             Some("playlist loaded; scan: 0 tracks (issues: 0)")
@@ -1514,6 +1756,27 @@ mod tests {
         assert_eq!(clamp_start_index(2, 3), 2);
         assert_eq!(clamp_start_index(3, 3), 2);
         assert_eq!(clamp_start_index(999, 3), 2);
+    }
+
+    #[test]
+    fn np_002_find_track_index_by_path_uses_canonicalize_fallback_for_equivalent_paths() {
+        let td = tempfile::tempdir().unwrap();
+        let base = td.path();
+        let sub = base.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = base.join("a.ogg");
+        write_dummy_file(&file, 16);
+
+        let direct = std::fs::canonicalize(&file).unwrap();
+        let needle = sub.join("..").join("a.ogg");
+        assert_ne!(
+            direct, needle,
+            "test setup requires distinct path spellings pointing to same file"
+        );
+
+        let tracks = vec![direct];
+        let idx = find_track_index_by_path(&tracks, &needle);
+        assert_eq!(idx, Some(0));
     }
 
     #[test]
@@ -1782,7 +2045,8 @@ mod tests {
         );
         assert_eq!(app.state.playlists.active.as_deref(), Some("p1"));
         assert_eq!(mock.config_writes(), before_cfg_writes + 1);
-        assert_eq!(mock.playlists_writes(), before_pls_writes + 1);
+        assert_eq!(mock.playlists_writes(), before_pls_writes);
+        assert!(app.state.playlists_dirty);
         assert!(
             app.scan_job.is_none(),
             "InlineScanSpawner should complete scan synchronously"
@@ -1842,7 +2106,8 @@ mod tests {
         );
         assert_eq!(app.state.playlists.active.as_deref(), Some("p1"));
         assert_eq!(mock.config_writes(), before_cfg_writes + 1);
-        assert_eq!(mock.playlists_writes(), before_pls_writes + 1);
+        assert_eq!(mock.playlists_writes(), before_pls_writes);
+        assert!(app.state.playlists_dirty);
 
         // Because playback was active, it should have stopped playback.
         assert_eq!(cmd_rx.try_recv().unwrap(), PlayerCommand::Stop);
@@ -1892,7 +2157,8 @@ mod tests {
         );
         assert_eq!(app.state.playlists.active.as_deref(), Some("p1"));
         assert_eq!(mock.config_writes(), before_cfg_writes + 1);
-        assert_eq!(mock.playlists_writes(), before_pls_writes + 1);
+        assert_eq!(mock.playlists_writes(), before_pls_writes);
+        assert!(app.state.playlists_dirty);
         assert_eq!(
             cmd_rx.try_recv().unwrap(),
             PlayerCommand::Stop,
@@ -2024,6 +2290,7 @@ mod tests {
         app.state.screen = Screen::NowPlaying;
         app.state.player.status = PlaybackStatus::Playing;
         app.state.player.current_path = Some(t2.clone());
+        let before_load_queue_commands_sent = app.load_queue_commands_sent;
 
         app.apply(Action::RescanLibrary).unwrap();
 
@@ -2031,7 +2298,133 @@ mod tests {
         assert_eq!(app.state.screen, Screen::NowPlaying);
         assert_eq!(
             app.state.status.as_deref(),
-            Some("scan complete: queue refreshed (restarted current track)")
+            Some("scan complete: queue resynced (preserved current track)")
+        );
+        assert_eq!(
+            app.load_queue_commands_sent, before_load_queue_commands_sent,
+            "resync should not issue a LoadQueue (no restart)"
+        );
+    }
+
+    #[test]
+    fn np_002_rescan_while_playing_resync_sends_resync_command_not_loadqueue() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let music_dir = td.path().join("music");
+        let t1 = music_dir.join("a.ogg");
+        let t2 = music_dir.join("b.ogg");
+        write_dummy_file(&t1, 16);
+        write_dummy_file(&t2, 16);
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
+        cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
+
+        let (mut app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::NowPlaying;
+        app.state.player.status = PlaybackStatus::Playing;
+        // Use a different path spelling pointing to the same file to exercise the
+        // canonicalize fallback in `find_track_index_by_path` (important on Windows).
+        let sub = music_dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        app.state.player.current_path = Some(sub.join("..").join("b.ogg"));
+
+        app.apply(Action::RescanLibrary).unwrap();
+
+        match cmd_rx.try_recv().unwrap() {
+            PlayerCommand::ResyncQueueAfterLibraryChange {
+                tracks,
+                current_path,
+            } => {
+                assert_eq!(tracks.len(), 2);
+                // `current_path` must match the exact `PathBuf` we send from the refreshed queue.
+                assert_eq!(current_path, tracks[1]);
+            }
+            other => panic!("expected ResyncQueueAfterLibraryChange, got: {other:?}"),
+        }
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "expected exactly one player command for resync branch"
+        );
+    }
+
+    #[test]
+    fn np_002_rescan_while_playing_missing_current_file_shuffle_off_loads_queue_start_index_0() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let music_dir = td.path().join("music");
+        let t1 = music_dir.join("a.ogg");
+        let t2 = music_dir.join("b.ogg");
+        write_dummy_file(&t1, 16);
+        write_dummy_file(&t2, 16);
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
+        cfg.settings.shuffle = false;
+        cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
+
+        let (mut app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::NowPlaying;
+        app.state.player.status = PlaybackStatus::Playing;
+        app.state.player.current_path = Some(music_dir.join("missing.ogg"));
+
+        app.apply(Action::RescanLibrary).unwrap();
+
+        match cmd_rx.try_recv().unwrap() {
+            PlayerCommand::LoadQueue {
+                tracks,
+                start_index,
+            } => {
+                assert_eq!(tracks.len(), 2);
+                assert_eq!(start_index, 0);
+            }
+            other => panic!("expected LoadQueue, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn np_002_rescan_while_playing_missing_current_file_reload_uses_seeded_rng_when_shuffled() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let music_dir = td.path().join("music");
+        let t1 = music_dir.join("a.ogg");
+        let t2 = music_dir.join("b.ogg");
+        write_dummy_file(&t1, 16);
+        write_dummy_file(&t2, 16);
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
+        cfg.settings.shuffle = true;
+        cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
+
+        let (mut app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
+        app.set_rng_seed_for_test(123);
+
+        app.state.screen = Screen::NowPlaying;
+        app.state.player.status = PlaybackStatus::Playing;
+        app.state.player.current_path = Some(music_dir.join("missing.ogg"));
+
+        app.apply(Action::RescanLibrary).unwrap();
+
+        assert_eq!(app.state.library.tracks.len(), 2);
+        assert_eq!(
+            app.load_queue_commands_sent, 1,
+            "fallback must reload queue"
+        );
+        assert_eq!(
+            app.state.status.as_deref(),
+            Some("scan complete: queue refreshed")
         );
     }
 
@@ -2056,6 +2449,69 @@ mod tests {
         assert_eq!(app.state.library.tracks.len(), 1);
         assert_eq!(app.state.screen, Screen::NowPlaying);
         assert_eq!(app.state.status, None);
+    }
+
+    #[test]
+    fn idx_001_cached_index_reuse_requires_matching_schema_version() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
+        cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
+
+        let manual = ManualScanSpawner::default();
+        let (mut app, _mock) =
+            app_with_mock_and_scan_spawner(paths, cfg, PlaylistsFile::default(), Box::new(manual));
+
+        // Forge a cache that *would* otherwise be reused (tracks non-empty + fingerprint match),
+        // but with a schema version mismatch. This must force a rescan.
+        let desired_fp = crate::indexer::compute_index_fingerprint(
+            &app.state
+                .cfg
+                .folders
+                .iter()
+                .map(|f| {
+                    let eff_kb = effective_min_size_kb_for_folder(f, &app.state.cfg.settings);
+                    let min_size_bytes = eff_kb.saturating_mul(1024);
+                    FolderScanEntry {
+                        path: f.path.clone(),
+                        scan_depth: f.scan_depth,
+                        min_size_bytes,
+                    }
+                })
+                .collect::<Vec<_>>(),
+            &ScanOptions {
+                supported_extensions: app.state.cfg.settings.supported_extensions.clone(),
+                min_size_bytes: app.state.cfg.settings.min_size_kb.saturating_mul(1024),
+                allow_name_size_fallback_dedup: true,
+                force_canonicalize_fail: false,
+            },
+        );
+
+        let mut lib = LibraryIndex::default();
+        lib.schema_version = LibraryIndex::SCHEMA_VERSION.saturating_sub(1);
+        lib.index_fingerprint = desired_fp;
+        lib.tracks = vec![TrackEntry {
+            id: TrackId(1),
+            path: std::path::PathBuf::from("A.ogg"),
+            rel_path: None,
+            size_bytes: 1,
+        }];
+        app.state.library = lib;
+
+        app.apply(Action::PlayerLoadFromLibrary { start_index: 0 })
+            .unwrap();
+
+        assert!(
+            app.scan_job.is_some(),
+            "schema mismatch must prevent cache reuse and start a scan"
+        );
+        assert_eq!(
+            app.load_queue_commands_sent, 0,
+            "must not reuse/load queue from a schema-mismatched cache"
+        );
     }
 
     #[test]
@@ -2128,6 +2584,302 @@ mod tests {
             app.load_queue_commands_sent, 1,
             "regression: must not load queue again on subsequent ticks"
         );
+    }
+
+    fn lib_with_fingerprint(fp: &str) -> LibraryIndex {
+        let mut lib = LibraryIndex::default();
+        lib.index_fingerprint = fp.to_string();
+        lib
+    }
+
+    #[test]
+    fn bg_rescan_debounce_does_not_start_scan_before_due() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
+
+        let manual = ManualScanSpawner::default();
+        let (mut app, _mock) =
+            app_with_mock_and_scan_spawner(paths, cfg, PlaylistsFile::default(), Box::new(manual));
+
+        app.schedule_debounced_background_rescan().unwrap();
+        let _ = app.tick().unwrap();
+        assert!(
+            app.scan_job.is_none(),
+            "debounce should prevent immediate scan start"
+        );
+
+        app.debounced_scan.as_mut().unwrap().due_at = Instant::now() - Duration::from_millis(1);
+        let _ = app.tick().unwrap();
+        assert!(
+            app.scan_job.is_some(),
+            "scan should start once debounce is due"
+        );
+    }
+
+    #[test]
+    fn bg_rescan_rapid_successive_changes_only_latest_token_is_scheduled() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
+
+        let manual = ManualScanSpawner::default();
+        let (mut app, _mock) =
+            app_with_mock_and_scan_spawner(paths, cfg, PlaylistsFile::default(), Box::new(manual));
+
+        app.schedule_debounced_background_rescan().unwrap();
+        let token1 = app.latest_bg_scan_token;
+        app.schedule_debounced_background_rescan().unwrap();
+        let token2 = app.latest_bg_scan_token;
+        assert_ne!(token1, token2);
+
+        let pending = app.debounced_scan.as_ref().unwrap();
+        assert_eq!(
+            pending.req.origin,
+            ScanOrigin::BackgroundRescan { token: token2 },
+            "rapid changes should keep only the latest scheduled background rescan"
+        );
+
+        app.debounced_scan.as_mut().unwrap().due_at = Instant::now() - Duration::from_millis(1);
+        let _ = app.tick().unwrap();
+
+        assert_eq!(
+            app.scan_job.as_ref().unwrap().origin,
+            ScanOrigin::BackgroundRescan { token: token2 }
+        );
+    }
+
+    #[test]
+    fn bg_rescan_stale_completion_is_ignored_by_token_mismatch_and_latest_is_applied() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new("C:\\Music".to_string())];
+
+        let manual = ManualScanSpawner::default();
+        let sender = manual.clone();
+        let (mut app, _mock) =
+            app_with_mock_and_scan_spawner(paths, cfg, PlaylistsFile::default(), Box::new(manual));
+
+        // Start background scan #1 (token1).
+        app.schedule_debounced_background_rescan().unwrap();
+        let token1 = app.latest_bg_scan_token;
+        app.debounced_scan.as_mut().unwrap().due_at = Instant::now() - Duration::from_millis(1);
+        let _ = app.tick().unwrap();
+        assert_eq!(
+            app.scan_job.as_ref().unwrap().origin,
+            ScanOrigin::BackgroundRescan { token: token1 }
+        );
+        let tx1 = sender.take_sender();
+
+        // While scan #1 is running, schedule and queue background scan #2 (token2).
+        app.schedule_debounced_background_rescan().unwrap();
+        let token2 = app.latest_bg_scan_token;
+        assert_ne!(token1, token2);
+        app.debounced_scan.as_mut().unwrap().due_at = Instant::now() - Duration::from_millis(1);
+        let _ = app.tick().unwrap();
+        assert!(
+            app.pending_scan.is_some(),
+            "second background scan should be queued while first is running"
+        );
+
+        // Complete scan #1 AFTER token2 is now latest; result must be ignored.
+        tx1.send(lib_with_fingerprint("old")).unwrap();
+        let _ = app.tick().unwrap();
+
+        // The app should immediately start the queued scan #2.
+        assert_eq!(
+            app.scan_job.as_ref().unwrap().origin,
+            ScanOrigin::BackgroundRescan { token: token2 }
+        );
+        let tx2 = sender.take_sender();
+        tx2.send(lib_with_fingerprint("new")).unwrap();
+
+        let _ = app.tick().unwrap();
+        assert_eq!(app.state.library.index_fingerprint, "new");
+        assert_ne!(app.state.library.index_fingerprint, "old");
+    }
+
+    #[test]
+    fn np_001_play_from_main_menu_when_same_folders_source_and_playing_only_navigates() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let music_dir = td.path().join("music_a");
+        std::fs::create_dir_all(&music_dir).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
+
+        let (mut app, mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
+        // Replace the real player handle so we can assert no commands are emitted.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::MainMenu;
+        app.state.player.status = PlaybackStatus::Playing;
+        app.state.playback_source = Some(PlaybackSource::from_active_playlist_or_folders(
+            None,
+            &app.state.cfg.folders,
+        ));
+
+        let before_cfg_writes = mock.config_writes();
+        let before_pls_writes = mock.playlists_writes();
+        let before_load_queue_commands_sent = app.load_queue_commands_sent;
+
+        app.apply(Action::PlayerLoadFromLibrary { start_index: 0 })
+            .unwrap();
+
+        assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(app.state.status, None);
+        assert_eq!(mock.config_writes(), before_cfg_writes);
+        assert_eq!(mock.playlists_writes(), before_pls_writes);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "guard should not emit any PlayerCommand (no Stop/LoadQueue/etc)"
+        );
+        assert!(
+            app.scan_job.is_none() && app.pending_scan.is_none(),
+            "guard should not start or queue a scan"
+        );
+        assert_eq!(
+            app.load_queue_commands_sent, before_load_queue_commands_sent,
+            "guard should not load/reload queue"
+        );
+    }
+
+    #[test]
+    fn np_001_play_from_main_menu_when_same_playlist_source_and_paused_only_navigates() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let music_dir = td.path().join("music_a");
+        std::fs::create_dir_all(&music_dir).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
+
+        let mut pls = PlaylistsFile::default();
+        pls.playlists.push(Playlist {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            folders: vec![FolderEntry::new(music_dir.to_string_lossy().to_string())],
+            extra: Default::default(),
+        });
+
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::MainMenu;
+        app.state.playlists.active = Some("p1".to_string());
+        app.state.player.status = PlaybackStatus::Paused;
+        app.state.playback_source = Some(PlaybackSource::Playlist("p1".to_string()));
+
+        let before_cfg_writes = mock.config_writes();
+        let before_pls_writes = mock.playlists_writes();
+        let before_load_queue_commands_sent = app.load_queue_commands_sent;
+
+        app.apply(Action::PlayerLoadFromLibrary { start_index: 0 })
+            .unwrap();
+
+        assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(app.state.status, None);
+        assert_eq!(mock.config_writes(), before_cfg_writes);
+        assert_eq!(mock.playlists_writes(), before_pls_writes);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "guard should not emit any PlayerCommand (no Stop/LoadQueue/etc)"
+        );
+        assert!(
+            app.scan_job.is_none() && app.pending_scan.is_none(),
+            "guard should not start or queue a scan"
+        );
+        assert_eq!(
+            app.load_queue_commands_sent, before_load_queue_commands_sent,
+            "guard should not load/reload queue"
+        );
+    }
+
+    #[test]
+    fn np_001_guard_does_not_trigger_when_stopped_even_if_sources_match() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let music_dir = td.path().join("music_a");
+        let track = music_dir.join("t1.ogg");
+        write_dummy_file(&track, 16);
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
+        cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
+
+        let (mut app, _mock) = app_with_mock(paths, cfg, PlaylistsFile::default());
+
+        app.state.screen = Screen::MainMenu;
+        app.state.player.status = PlaybackStatus::Stopped;
+        app.state.playback_source = Some(PlaybackSource::from_active_playlist_or_folders(
+            None,
+            &app.state.cfg.folders,
+        ));
+
+        let before_load_queue_commands_sent = app.load_queue_commands_sent;
+
+        app.apply(Action::PlayerLoadFromLibrary { start_index: 0 })
+            .unwrap();
+
+        assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(
+            app.state.library.tracks.len(),
+            1,
+            "stopped playback must still scan/load the library"
+        );
+        assert!(
+            app.load_queue_commands_sent > before_load_queue_commands_sent,
+            "stopped playback must load the queue (guard must not early-return)"
+        );
+    }
+
+    #[test]
+    fn np_001_guard_does_not_trigger_when_playing_but_requested_source_differs() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.settings.min_size_kb = 0;
+        cfg.settings.min_size_bytes = 0;
+        cfg.folders = vec![FolderEntry::new("C:\\MusicA".to_string())];
+
+        let manual = ManualScanSpawner::default();
+        let (mut app, _mock) =
+            app_with_mock_and_scan_spawner(paths, cfg, PlaylistsFile::default(), Box::new(manual));
+
+        app.state.screen = Screen::MainMenu;
+        app.state.player.status = PlaybackStatus::Playing;
+        // Make the currently-playing source differ from the requested source (which is derived
+        // from cfg.folders above) so the NP-001 guard must NOT early-return.
+        app.state.playback_source = Some(PlaybackSource::from_active_playlist_or_folders(
+            None,
+            &[FolderEntry::new("C:\\MusicB".to_string())],
+        ));
+
+        app.apply(Action::PlayerLoadFromLibrary { start_index: 0 })
+            .unwrap();
+
+        assert!(
+            app.scan_job.is_some(),
+            "different requested source must start a scan (guard must not early-return)"
+        );
+        assert_eq!(
+            app.scan_job.as_ref().unwrap().origin,
+            ScanOrigin::PlayFromLibrary { start_index: 0 }
+        );
+        assert_eq!(app.state.screen, Screen::NowPlaying);
     }
 
     #[test]

@@ -6,3 +6,5 @@ pub use model::{
     FolderScanEntry, IndexIssue, IndexIssueKind, IndexReport, LibraryIndex, ScanOptions,
     TrackEntry, TrackId,
 };
+
+pub use scan::compute_index_fingerprint;

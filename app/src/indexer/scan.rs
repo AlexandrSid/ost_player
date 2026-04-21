@@ -8,6 +8,57 @@ use std::ffi::{OsStr, OsString};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+pub fn compute_index_fingerprint(folders: &[FolderScanEntry], options: &ScanOptions) -> String {
+    let opts = options.normalized();
+
+    // Keep the fingerprint stable even if folder order in config changes.
+    let mut entries = folders
+        .iter()
+        .map(|f| {
+            (
+                normalize_fingerprint_path(&f.path),
+                scan_depth_tag(f.scan_depth),
+                f.min_size_bytes,
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+
+    // Use a deterministic hash (FNV-1a 64-bit). `DefaultHasher` is not stable across runs.
+    let mut h = Fnv1a64::new();
+    h.write_bytes(b"ost_player:index_fingerprint:v1\0");
+
+    h.write_bytes(b"exts\0");
+    for ext in opts.supported_extensions.iter() {
+        h.write_str(ext);
+        h.write_bytes(b"\0");
+    }
+
+    h.write_bytes(b"folders\0");
+    for (path, depth_tag, min_size) in entries {
+        h.write_str(&path);
+        h.write_bytes(b"\0");
+        h.write_u8(depth_tag);
+        h.write_u64(min_size);
+        h.write_bytes(b"\0");
+    }
+
+    // Include relevant option knobs even if currently constant in callers.
+    h.write_u64(opts.min_size_bytes);
+    h.write_bool(opts.allow_name_size_fallback_dedup);
+    h.write_bool(opts.force_canonicalize_fail);
+
+    format!("{:016x}", h.finish())
+}
+
+fn scan_depth_tag(d: ScanDepth) -> u8 {
+    match d {
+        ScanDepth::RootOnly => 0,
+        ScanDepth::OneLevel => 1,
+        ScanDepth::Recursive => 2,
+    }
+}
+
 pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
     let folders = roots
         .iter()
@@ -22,6 +73,7 @@ pub fn scan_library(roots: &[String], options: &ScanOptions) -> LibraryIndex {
 
 pub fn scan_library_folders(folders: &[FolderScanEntry], options: &ScanOptions) -> LibraryIndex {
     let options = options.normalized();
+    let fingerprint = compute_index_fingerprint(folders, &options);
     let mut report = IndexReport {
         roots_total: folders.len(),
         ..Default::default()
@@ -117,9 +169,60 @@ pub fn scan_library_folders(folders: &[FolderScanEntry], options: &ScanOptions) 
 
     report.tracks_total = tracks.len();
     LibraryIndex {
-        schema_version: 1,
+        schema_version: LibraryIndex::SCHEMA_VERSION,
+        index_fingerprint: fingerprint,
         tracks,
         report,
+    }
+}
+
+fn normalize_fingerprint_path(p: &str) -> String {
+    #[cfg(windows)]
+    {
+        p.trim().replace('/', "\\").to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        p.trim().to_string()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Fnv1a64(u64);
+
+impl Fnv1a64 {
+    fn new() -> Self {
+        // FNV-1a 64-bit offset basis.
+        Self(0xcbf29ce484222325)
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        // FNV-1a 64-bit prime.
+        const PRIME: u64 = 0x00000100000001B3;
+        for b in bytes {
+            self.0 ^= *b as u64;
+            self.0 = self.0.wrapping_mul(PRIME);
+        }
+    }
+
+    fn write_str(&mut self, s: &str) {
+        self.write_bytes(s.as_bytes())
+    }
+
+    fn write_u8(&mut self, v: u8) {
+        self.write_bytes(&[v])
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.write_bytes(&v.to_le_bytes())
+    }
+
+    fn write_bool(&mut self, v: bool) {
+        self.write_u8(if v { 1 } else { 0 })
+    }
+
+    fn finish(self) -> u64 {
+        self.0
     }
 }
 
@@ -579,5 +682,140 @@ mod tests {
         // Ensure it came from root_a not root_b by checking parent folder.
         let p = index.tracks[0].path.to_string_lossy().to_string();
         assert!(p.contains("\\a\\") || p.contains("/a/"), "got path: {p}");
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_for_same_inputs_even_if_order_differs() {
+        let opts = ScanOptions {
+            supported_extensions: vec!["ogg".to_string(), ".FlAc".to_string()],
+            min_size_bytes: 123,
+            allow_name_size_fallback_dedup: true,
+            force_canonicalize_fail: false,
+        };
+        let a = FolderScanEntry {
+            path: "C:/Music".to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 1,
+        };
+        let b = FolderScanEntry {
+            path: "C:/Music2".to_string(),
+            scan_depth: ScanDepth::RootOnly,
+            min_size_bytes: 2,
+        };
+
+        let fp1 = compute_index_fingerprint(&[a.clone(), b.clone()], &opts);
+        let fp2 = compute_index_fingerprint(&[b, a], &opts);
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_is_stable_under_extension_normalization() {
+        let folders = vec![FolderScanEntry {
+            path: "C:/Music".to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 1,
+        }];
+
+        let a = ScanOptions {
+            supported_extensions: vec![".OGG".to_string(), " mp3 ".to_string(), "ogg".to_string()],
+            min_size_bytes: 10,
+            allow_name_size_fallback_dedup: false,
+            force_canonicalize_fail: false,
+        };
+        let b = ScanOptions {
+            supported_extensions: vec!["mp3".to_string(), "ogg".to_string()],
+            min_size_bytes: 10,
+            allow_name_size_fallback_dedup: false,
+            force_canonicalize_fail: false,
+        };
+
+        assert_eq!(
+            compute_index_fingerprint(&folders, &a),
+            compute_index_fingerprint(&folders, &b),
+            "extension list normalization should not affect fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_scan_parameters_change() {
+        let folders = vec![FolderScanEntry {
+            path: "C:/Music".to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 1,
+        }];
+
+        let base = ScanOptions {
+            supported_extensions: vec!["ogg".to_string()],
+            min_size_bytes: 10,
+            allow_name_size_fallback_dedup: false,
+            force_canonicalize_fail: false,
+        };
+        let mut changed = base.clone();
+        changed.min_size_bytes = 11;
+
+        assert_ne!(
+            compute_index_fingerprint(&folders, &base),
+            compute_index_fingerprint(&folders, &changed),
+            "min_size_bytes should participate in fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_folder_entry_changes() {
+        let opts = ScanOptions {
+            supported_extensions: vec!["ogg".to_string()],
+            min_size_bytes: 10,
+            allow_name_size_fallback_dedup: false,
+            force_canonicalize_fail: false,
+        };
+
+        let a = FolderScanEntry {
+            path: "C:/Music".to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 1,
+        };
+        let mut b = a.clone();
+        b.scan_depth = ScanDepth::RootOnly;
+
+        assert_ne!(
+            compute_index_fingerprint(&[a], &opts),
+            compute_index_fingerprint(&[b], &opts),
+            "scan_depth should participate in fingerprint"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn fingerprint_normalizes_windows_paths_for_stability() {
+        let opts = ScanOptions {
+            supported_extensions: vec!["ogg".to_string()],
+            min_size_bytes: 0,
+            allow_name_size_fallback_dedup: false,
+            force_canonicalize_fail: false,
+        };
+
+        let a = FolderScanEntry {
+            path: " C:/Music ".to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 1,
+        };
+        let b = FolderScanEntry {
+            path: "c:\\music".to_string(),
+            scan_depth: ScanDepth::Recursive,
+            min_size_bytes: 1,
+        };
+
+        assert_eq!(
+            compute_index_fingerprint(&[a], &opts),
+            compute_index_fingerprint(&[b], &opts),
+            "fingerprint should be stable across slash/case/whitespace variations on Windows"
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn normalize_fingerprint_path_does_not_change_separators_on_non_windows() {
+        assert_eq!(normalize_fingerprint_path(" /a/b/c "), "/a/b/c");
+        assert_eq!(normalize_fingerprint_path("/a\\b"), "/a\\b");
     }
 }

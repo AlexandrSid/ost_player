@@ -155,10 +155,6 @@ struct SettingsConfigDe {
     #[serde(default)]
     min_size_kb: Option<u64>,
 
-    /// Legacy field, supported for read-compat only.
-    #[serde(default)]
-    min_size_bytes: Option<u64>,
-
     #[serde(default)]
     shuffle: bool,
 
@@ -204,12 +200,7 @@ impl<'de> Deserialize<'de> for SettingsConfig {
             Some(v) => v,
         };
 
-        // Precedence: `min_size_kb` wins when both are present.
-        // Legacy conversion rounds down (bytes -> kb) to keep behavior simple/stable.
-        let min_size_kb = v
-            .min_size_kb
-            .or_else(|| v.min_size_bytes.map(|b| b / 1024))
-            .unwrap_or_else(defaults::default_min_size_kb);
+        let min_size_kb = v.min_size_kb.unwrap_or_else(defaults::default_min_size_kb);
 
         let min_size_bytes = min_size_kb
             .checked_mul(1024)
@@ -348,17 +339,9 @@ struct AudioConfigDe {
     #[serde(default)]
     volume_default_percent: Option<u8>,
 
-    /// Legacy field, supported for read-compat only.
-    #[serde(default)]
-    default_volume_percent: Option<u8>,
-
     /// New field.
     #[serde(default)]
     volume_available_percent: Option<Vec<u8>>,
-
-    /// Legacy field, supported for read-compat only.
-    #[serde(default)]
-    volume_step_percent: Option<u8>,
 
     /// Preserve unknown `audio.*` fields for forward compatibility.
     #[serde(flatten, default)]
@@ -386,21 +369,13 @@ impl<'de> Deserialize<'de> for AudioConfig {
             Some(v) => v,
         };
 
-        // Alias/migration: prefer the new name, fall back to the legacy one.
         let volume_default_percent = v
             .volume_default_percent
-            .or(v.default_volume_percent)
             .unwrap_or_else(defaults::default_volume_default_percent);
 
-        // Migration: if the new list is missing, but legacy step exists, generate
-        // [0, step, 2*step, ... 100].
-        let volume_available_percent = if let Some(list) = v.volume_available_percent {
-            list
-        } else if let Some(step) = v.volume_step_percent {
-            volume_available_from_step(step)
-        } else {
-            defaults::default_volume_available_percent()
-        };
+        let volume_available_percent = v
+            .volume_available_percent
+            .unwrap_or_else(defaults::default_volume_available_percent);
 
         Ok(Self {
             volume_default_percent,
@@ -415,7 +390,6 @@ impl Serialize for AudioConfig {
     where
         S: serde::Serializer,
     {
-        // Migration-on-save: write new fields only (legacy names omitted).
         AudioConfigSer {
             volume_default_percent: self.volume_default_percent,
             volume_available_percent: &self.volume_available_percent,
@@ -429,21 +403,6 @@ impl Default for AudioConfig {
     fn default() -> Self {
         defaults::default_audio()
     }
-}
-
-fn volume_available_from_step(step: u8) -> Vec<u8> {
-    // Be forgiving during migration; validation will reject bad values later.
-    let step = step.max(1);
-    let mut out = Vec::new();
-    let mut cur: u8 = 0;
-    loop {
-        out.push(cur);
-        if cur == 100 {
-            break;
-        }
-        cur = cur.saturating_add(step).min(100);
-    }
-    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -524,7 +483,7 @@ pub struct AppConfig {
     pub settings: SettingsConfig,
 
     /// Active folders used for indexing/playback (portable: absolute paths are expected).
-    #[serde(default, deserialize_with = "deserialize_folders_compat")]
+    #[serde(default)]
     pub folders: Vec<FolderEntry>,
 
     #[serde(default)]
@@ -706,12 +665,8 @@ impl FolderEntry {
 struct FolderEntryDe {
     path: String,
 
-    /// Legacy field, supported for read-compat only.
     #[serde(default)]
-    root_only: Option<bool>,
-
-    #[serde(default)]
-    scan_depth: Option<ScanDepth>,
+    scan_depth: ScanDepth,
 
     #[serde(default)]
     custom_min_size_kb: Option<u32>,
@@ -734,23 +689,9 @@ impl<'de> Deserialize<'de> for FolderEntry {
         D: de::Deserializer<'de>,
     {
         let v = FolderEntryDe::deserialize(deserializer)?;
-
-        // Precedence: new enum wins when both are present.
-        let scan_depth = if let Some(d) = v.scan_depth {
-            d
-        } else if let Some(root_only) = v.root_only {
-            if root_only {
-                ScanDepth::RootOnly
-            } else {
-                ScanDepth::Recursive
-            }
-        } else {
-            default_scan_depth()
-        };
-
         Ok(Self {
             path: v.path,
-            scan_depth,
+            scan_depth: v.scan_depth,
             custom_min_size_kb: v.custom_min_size_kb,
         })
     }
@@ -761,7 +702,6 @@ impl Serialize for FolderEntry {
     where
         S: serde::Serializer,
     {
-        // Migration-on-save: write `scan_depth` only (legacy `root_only` omitted).
         FolderEntrySer {
             path: self.path.as_str(),
             scan_depth: self.scan_depth,
@@ -809,25 +749,6 @@ fn dedup_keep_order_folders(mut items: Vec<FolderEntry>) -> Vec<FolderEntry> {
     items
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum FoldersCompat {
-    Old(Vec<String>),
-    New(Vec<FolderEntry>),
-}
-
-fn deserialize_folders_compat<'de, D>(deserializer: D) -> Result<Vec<FolderEntry>, D::Error>
-where
-    D: de::Deserializer<'de>,
-{
-    let v = Option::<FoldersCompat>::deserialize(deserializer)?;
-    Ok(match v {
-        None => Vec::new(),
-        Some(FoldersCompat::Old(paths)) => paths.into_iter().map(FolderEntry::new).collect(),
-        Some(FoldersCompat::New(entries)) => entries,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,33 +762,6 @@ mod tests {
         assert_eq!(b, ScanDepth::OneLevel);
         assert_eq!(c, ScanDepth::Recursive);
         assert_eq!(d, ScanDepth::RootOnly);
-    }
-
-    #[test]
-    fn legacy_yaml_folders_vec_string_deserializes_into_folder_entries_scan_depth_root_only() {
-        let raw = r#"
-schema_version: 1
-folders: ["C:\\Music", "D:\\OST"]
-settings:
-  supported_extensions: [mp3]
-"#;
-
-        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(
-            cfg.folders,
-            vec![
-                FolderEntry {
-                    path: "C:\\Music".to_string(),
-                    scan_depth: ScanDepth::RootOnly,
-                    custom_min_size_kb: None,
-                },
-                FolderEntry {
-                    path: "D:\\OST".to_string(),
-                    scan_depth: ScanDepth::RootOnly,
-                    custom_min_size_kb: None,
-                }
-            ]
-        );
     }
 
     #[test]
@@ -958,37 +852,6 @@ settings:
     }
 
     #[test]
-    fn folder_entry_legacy_root_only_bool_deserializes_into_scan_depth() {
-        let raw = r#"
-path: "C:\\Music"
-root_only: false
-"#;
-        let entry: FolderEntry = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(entry.scan_depth, ScanDepth::Recursive);
-    }
-
-    #[test]
-    fn folder_entry_legacy_root_only_true_deserializes_into_root_only_scan_depth() {
-        let raw = r#"
-path: "C:\\Music"
-root_only: true
-"#;
-        let entry: FolderEntry = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(entry.scan_depth, ScanDepth::RootOnly);
-    }
-
-    #[test]
-    fn folder_entry_deserialization_prefers_scan_depth_over_legacy_root_only_when_both_present() {
-        let raw = r#"
-path: "C:\\Music"
-root_only: true
-scan_depth: recursive
-"#;
-        let entry: FolderEntry = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(entry.scan_depth, ScanDepth::Recursive);
-    }
-
-    #[test]
     fn folder_entry_serialization_includes_non_default_scan_depth() {
         let entry = FolderEntry {
             path: "C:\\Music".to_string(),
@@ -998,48 +861,6 @@ scan_depth: recursive
         let y = serde_yaml::to_string(&entry).unwrap();
         assert!(y.contains("scan_depth"));
         assert!(y.contains("one_level"));
-    }
-
-    #[test]
-    fn settings_min_size_kb_wins_over_legacy_min_size_bytes_when_both_present() {
-        let raw = r#"
-schema_version: 1
-settings:
-  min_size_kb: 2
-  min_size_bytes: 999999999
-  supported_extensions: [mp3]
-"#;
-
-        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(cfg.settings.min_size_kb, 2);
-        assert_eq!(cfg.settings.min_size_bytes, 2 * 1024);
-    }
-
-    #[test]
-    fn audio_legacy_default_volume_percent_deserializes_into_volume_default_percent() {
-        let raw = r#"
-schema_version: 1
-settings:
-  supported_extensions: [mp3]
-audio:
-  default_volume_percent: 42
-  volume_available_percent: [0, 50, 100]
-"#;
-        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(cfg.audio.volume_default_percent, 42);
-    }
-
-    #[test]
-    fn audio_volume_step_percent_migrates_into_volume_available_percent_when_list_missing() {
-        let raw = r#"
-schema_version: 1
-settings:
-  supported_extensions: [mp3]
-audio:
-  volume_step_percent: 30
-"#;
-        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(cfg.audio.volume_available_percent, vec![0, 30, 60, 90, 100]);
     }
 
     #[test]

@@ -462,10 +462,18 @@ fn index_cache_save_load_roundtrip_best_effort() {
 
     let options = default_scan_options();
     let idx = scan_library(&[root.to_string_lossy().to_string()], &options);
+    assert!(
+        !idx.index_fingerprint.is_empty(),
+        "scan should compute a non-empty index_fingerprint"
+    );
     index_io::save(&paths, &idx).expect("save index cache should succeed");
 
     let loaded = index_io::load_best_effort(&paths).expect("cache should load after save");
     assert_eq!(loaded.schema_version, idx.schema_version);
+    assert_eq!(
+        loaded.index_fingerprint, idx.index_fingerprint,
+        "persisted index.yaml must round-trip index_fingerprint"
+    );
     assert_eq!(loaded.tracks.len(), idx.tracks.len());
     assert_eq!(loaded.report.tracks_total, idx.report.tracks_total);
 

@@ -30,23 +30,6 @@ fn read_yaml_value(path: &std::path::Path) -> Value {
 }
 
 #[test]
-fn yaml_parse_legacy_root_only_bool_true_false_maps_to_expected_scan_depth() {
-    let raw_true = r#"
-path: 'C:\Music'
-root_only: true
-"#;
-    let entry_true: FolderEntry = serde_yaml::from_str(raw_true).unwrap();
-    assert_eq!(entry_true.scan_depth, ScanDepth::RootOnly);
-
-    let raw_false = r#"
-path: 'C:\Music'
-root_only: false
-"#;
-    let entry_false: FolderEntry = serde_yaml::from_str(raw_false).unwrap();
-    assert_eq!(entry_false.scan_depth, ScanDepth::Recursive);
-}
-
-#[test]
 fn yaml_parse_new_enum_form_accepts_all_variants() {
     for (yaml, want) in [
         ("root_only", ScanDepth::RootOnly),
@@ -62,17 +45,6 @@ scan_depth: {yaml}
         let entry: FolderEntry = serde_yaml::from_str(&raw).unwrap();
         assert_eq!(entry.scan_depth, want, "yaml was: {yaml}");
     }
-}
-
-#[test]
-fn yaml_parse_enum_form_wins_when_both_scan_depth_and_legacy_root_only_present() {
-    let raw = r#"
-path: 'C:\Music'
-root_only: true
-scan_depth: recursive
-"#;
-    let entry: FolderEntry = serde_yaml::from_str(raw).unwrap();
-    assert_eq!(entry.scan_depth, ScanDepth::Recursive);
 }
 
 #[test]

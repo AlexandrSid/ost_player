@@ -19,13 +19,12 @@ const CONFIG_HELP_HEADER: &str = r#"# ost_player config
 #
 # Audio
 # - audio.volume_default_percent: initial volume for the current app session (0..=100)
-#   - legacy alias accepted on load: audio.default_volume_percent
 # - audio.volume_available_percent: discrete volume ladder (0..=100), must be unique + sorted and include 0 and 100
-#   - legacy migration accepted on load: audio.volume_step_percent (generates [0, step, 2*step, ... 100] if the ladder is missing)
 #
 # Logging
 # - logging.default_level: default | debug | trace
-#   - default: includes ERROR/FATAL + config-changing domain events; excludes playback chatter
+#   - default: global ERROR + a narrow INFO whitelist for explicit persistence events
+#     (logs emitted with `target=ost_player::persist`); excludes startup dumps and playback chatter
 #   - debug/trace: more app logs (dependencies are still suppressed unless overridden)
 # - logging.retention_days: delete log files older than this many days on startup
 # - Rotation: logs are written into ~10-day buckets (3 files/month) under data/logs/
@@ -197,28 +196,6 @@ settings:
         let cfg = load_or_create(&paths).unwrap();
         assert!(cfg.settings.shuffle);
         assert!(cfg.settings.extra.contains_key("future_setting"));
-    }
-
-    #[test]
-    fn legacy_folders_vec_string_deserializes_as_root_only_true() {
-        let raw = r#"
-schema_version: 1
-folders: ["C:\\Music", "D:\\More"]
-settings:
-  supported_extensions: [mp3]
-"#;
-        let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(cfg.folders.len(), 2);
-        assert_eq!(cfg.folders[0].path, "C:\\Music");
-        assert_eq!(
-            cfg.folders[0].scan_depth,
-            crate::config::ScanDepth::RootOnly
-        );
-        assert_eq!(cfg.folders[1].path, "D:\\More");
-        assert_eq!(
-            cfg.folders[1].scan_depth,
-            crate::config::ScanDepth::RootOnly
-        );
     }
 
     #[test]

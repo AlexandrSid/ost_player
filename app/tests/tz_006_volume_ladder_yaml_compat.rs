@@ -134,30 +134,12 @@ fn validate_rejects_invalid_volume_ladder_duplicate_unsorted_out_of_range_or_mis
 }
 
 #[test]
-fn yaml_migrates_volume_step_percent_into_generated_ladder_when_list_missing() {
+fn yaml_parses_explicit_volume_available_percent() {
     let raw = r#"
 schema_version: 1
 settings:
   supported_extensions: [mp3]
 audio:
-  volume_step_percent: 7
-"#;
-    let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
-    assert_eq!(
-        cfg.audio.volume_available_percent,
-        vec![0u8, 7, 14, 21, 28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 100]
-    );
-}
-
-#[test]
-fn yaml_prefers_explicit_volume_available_percent_over_legacy_volume_step_percent_when_both_present(
-) {
-    let raw = r#"
-schema_version: 1
-settings:
-  supported_extensions: [mp3]
-audio:
-  volume_step_percent: 25
   volume_available_percent: [0, 1, 2, 100]
 "#;
     let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
@@ -165,30 +147,15 @@ audio:
 }
 
 #[test]
-fn yaml_aliases_default_volume_percent_into_volume_default_percent() {
+fn yaml_parses_explicit_volume_default_percent() {
     let raw = r#"
 schema_version: 1
 settings:
   supported_extensions: [mp3]
 audio:
-  default_volume_percent: 33
+  volume_default_percent: 33
   volume_available_percent: [0, 33, 100]
 "#;
     let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
     assert_eq!(cfg.audio.volume_default_percent, 33);
-}
-
-#[test]
-fn yaml_new_volume_default_percent_wins_when_both_new_and_legacy_present() {
-    let raw = r#"
-schema_version: 1
-settings:
-  supported_extensions: [mp3]
-audio:
-  default_volume_percent: 33
-  volume_default_percent: 44
-  volume_available_percent: [0, 44, 100]
-"#;
-    let cfg: AppConfig = serde_yaml::from_str(raw).unwrap();
-    assert_eq!(cfg.audio.volume_default_percent, 44);
 }

@@ -13,6 +13,31 @@ use ratatui::{prelude::*, Terminal};
 use std::io;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResizeDecision {
+    needs_redraw: bool,
+    next_minimized: bool,
+    resize_to: Option<Rect>,
+    activity_changed: bool,
+}
+
+fn decide_resize(w: u16, h: u16, minimized: bool) -> ResizeDecision {
+    // Best-effort minimize detection: some terminals report 0x0 when minimized.
+    let next_minimized = w == 0 || h == 0;
+    let resize_to = if next_minimized {
+        None
+    } else {
+        Some(Rect::new(0, 0, w, h))
+    };
+    ResizeDecision {
+        // Any resize implies a redraw (layout depends on available area).
+        needs_redraw: true,
+        next_minimized,
+        resize_to,
+        activity_changed: next_minimized != minimized,
+    }
+}
+
 struct TerminalRestoreGuard {
     raw_mode_enabled: bool,
     alt_screen_enabled: bool,
@@ -123,8 +148,9 @@ pub fn run(app: &mut TuiApp) -> AppResult<()> {
             }
 
             while let Some(msg) = bus.try_recv() {
+                needs_redraw = true;
                 if handle_bus_message(app, msg)? {
-                    break;
+                    return Ok(());
                 }
             }
 
@@ -170,11 +196,16 @@ pub fn run(app: &mut TuiApp) -> AppResult<()> {
                         );
                     }
                     Event::Resize(w, h) => {
-                        // Best-effort minimize detection: some terminals report 0x0 when minimized.
-                        let next_minimized = w == 0 || h == 0;
-                        if next_minimized != minimized {
-                            minimized = next_minimized;
-                            needs_redraw = true;
+                        let d = decide_resize(w, h, minimized);
+                        needs_redraw |= d.needs_redraw;
+
+                        // Ratatui doesn't always pick up size changes immediately on all backends;
+                        // explicitly forward the new size when it's non-zero.
+                        if let Some(r) = d.resize_to {
+                            terminal.resize(r).map_err(anyhow::Error::new)?;
+                        }
+                        if d.activity_changed {
+                            minimized = d.next_minimized;
                             bus.emit_action(
                                 CommandSource::System,
                                 Action::PlayerSetUiActivity { focused, minimized },
@@ -260,5 +291,43 @@ fn handle_action(app: &mut TuiApp, action: Action) -> AppResult<bool> {
 fn handle_bus_message(app: &mut TuiApp, msg: BusMessage) -> AppResult<bool> {
     match msg {
         BusMessage::Command(cmd) => handle_action(app, cmd.action),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_nonzero_triggers_redraw_and_requests_terminal_resize() {
+        let d = decide_resize(80, 24, /* minimized */ false);
+        assert!(d.needs_redraw);
+        assert!(!d.next_minimized);
+        assert_eq!(d.resize_to, Some(Rect::new(0, 0, 80, 24)));
+        assert!(
+            !d.activity_changed,
+            "minimized state unchanged should not emit activity change"
+        );
+    }
+
+    #[test]
+    fn resize_zero_by_zero_is_treated_as_minimize_and_does_not_resize_terminal() {
+        let d = decide_resize(0, 0, /* minimized */ false);
+        assert!(d.needs_redraw);
+        assert!(d.next_minimized);
+        assert_eq!(d.resize_to, None, "0x0 must not call terminal.resize()");
+        assert!(d.activity_changed, "minimize transition should be observed");
+    }
+
+    #[test]
+    fn resize_back_from_minimized_requests_resize_and_activity_change() {
+        let d = decide_resize(120, 40, /* minimized */ true);
+        assert!(d.needs_redraw);
+        assert!(!d.next_minimized);
+        assert_eq!(d.resize_to, Some(Rect::new(0, 0, 120, 40)));
+        assert!(
+            d.activity_changed,
+            "restore from minimized should be observed"
+        );
     }
 }

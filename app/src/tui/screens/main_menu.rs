@@ -10,6 +10,7 @@ pub struct MainMenuScreen {
     add_folder: Option<TextInput>,
     confirm_remove: Option<ConfirmDialog>,
     custom_min_size_input: Option<(usize, TextInput)>,
+    confirm_quit: Option<ConfirmDialog>,
 }
 
 impl MainMenuScreen {
@@ -24,6 +25,17 @@ impl MainMenuScreen {
                 return Ok(match done {
                     crate::tui::widgets::TextInputResult::Submit(v) => Some(Action::AddFolder(v)),
                     crate::tui::widgets::TextInputResult::Cancel => Some(Action::ClearStatus),
+                });
+            }
+            return Ok(None);
+        }
+
+        if let Some(confirm) = &mut self.confirm_quit {
+            if let Some(res) = confirm.on_key(key) {
+                self.confirm_quit = None;
+                return Ok(match res {
+                    true => Some(Action::Quit),
+                    false => Some(Action::ClearStatus),
                 });
             }
             return Ok(None);
@@ -92,6 +104,10 @@ impl MainMenuScreen {
                 if (1..=9).contains(&digit) {
                     if let Some(map) = state.cfg.tui.resolved_main_menu_numeric_mapping() {
                         if let Some(cmd) = map[(digit - 1) as usize] {
+                            if cmd == MainMenuCommand::Play {
+                                // Play is not part of the numeric main-menu mapping UX.
+                                return None;
+                            }
                             return self.dispatch_main_menu_command(state, cmd);
                         }
                         return None;
@@ -101,7 +117,17 @@ impl MainMenuScreen {
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('0') => Some(Action::Quit),
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if state.playlists_dirty {
+                    self.confirm_quit = Some(ConfirmDialog::new(
+                        "Unsaved playlist changes. Quit without saving?",
+                        "Enter=yes  Esc=no",
+                    ));
+                    Some(Action::SetStatus("confirm quit...".to_string()))
+                } else {
+                    Some(Action::Quit)
+                }
+            }
             KeyCode::Up => Some(Action::SelectFolderDelta(-1)),
             KeyCode::Down => Some(Action::SelectFolderDelta(1)),
             KeyCode::Char('1') | KeyCode::Char('a') => {
@@ -116,7 +142,7 @@ impl MainMenuScreen {
                 state,
                 MainMenuCommand::SetSelectedFolderCustomMinSizeKb,
             ),
-            KeyCode::Char('5') | KeyCode::Enter | KeyCode::Char(' ') => {
+            KeyCode::Enter | KeyCode::Char(' ') => {
                 self.dispatch_main_menu_command(state, MainMenuCommand::Play)
             }
             KeyCode::Char('6') | KeyCode::Char('s') => Some(Action::Navigate(Screen::Settings)),
@@ -206,6 +232,7 @@ impl MainMenuScreen {
         MainMenuView {
             add_folder: self.add_folder.as_ref(),
             confirm_remove: self.confirm_remove.as_ref(),
+            confirm_quit: self.confirm_quit.as_ref(),
             custom_min_size_input: self.custom_min_size_input.as_ref().map(|(_, i)| i),
             folders: &state.cfg.folders,
             selected_folder: state.main_selected_folder,
@@ -216,6 +243,7 @@ impl MainMenuScreen {
 pub struct MainMenuView<'a> {
     pub add_folder: Option<&'a TextInput>,
     pub confirm_remove: Option<&'a ConfirmDialog>,
+    pub confirm_quit: Option<&'a ConfirmDialog>,
     pub custom_min_size_input: Option<&'a TextInput>,
     pub folders: &'a [crate::config::FolderEntry],
     pub selected_folder: usize,
@@ -330,20 +358,6 @@ mod tests {
             ))
         );
         assert!(screen.view(&state).custom_min_size_input.is_some());
-    }
-
-    #[test]
-    fn key_5_emits_play_action() {
-        let td = tempfile::tempdir().unwrap();
-        let state = make_state(td.path(), vec![]);
-
-        let mut screen = MainMenuScreen::default();
-        let action = screen.on_key(&state, key('5')).unwrap();
-
-        assert_eq!(
-            action,
-            Some(Action::PlayerLoadFromLibrary { start_index: 0 })
-        );
     }
 
     #[test]
@@ -623,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn key_5_and_s_navigate_to_settings() {
+    fn key_6_and_s_navigate_to_settings() {
         let td = tempfile::tempdir().unwrap();
         let state = make_state(td.path(), vec![]);
 
@@ -671,20 +685,95 @@ mod tests {
     }
 
     #[test]
-    fn key_0_q_and_esc_quit() {
+    fn key_q_and_esc_quit_when_not_dirty() {
         let td = tempfile::tempdir().unwrap();
-        let state = make_state(td.path(), vec![]);
+        let mut state = make_state(td.path(), vec![]);
+        state.playlists_dirty = false;
 
-        let inputs = [
-            key('0'),
-            key('q'),
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
-        ];
+        let inputs = [key('q'), KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())];
         for k in inputs {
             let mut screen = MainMenuScreen::default();
             let action = screen.on_key(&state, k).unwrap();
             assert_eq!(action, Some(Action::Quit));
         }
+    }
+
+    #[test]
+    fn key_q_and_esc_when_dirty_opens_confirm_quit_modal_instead_of_quitting() {
+        let td = tempfile::tempdir().unwrap();
+        let mut state = make_state(td.path(), vec![]);
+        state.playlists_dirty = true;
+
+        let inputs = [key('q'), KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())];
+        for k in inputs {
+            let mut screen = MainMenuScreen::default();
+            let action = screen.on_key(&state, k).unwrap();
+            assert_eq!(
+                action,
+                Some(Action::SetStatus("confirm quit...".to_string()))
+            );
+            assert!(
+                screen.view(&state).confirm_quit.is_some(),
+                "expected confirm quit modal to be open when dirty"
+            );
+        }
+    }
+
+    #[test]
+    fn confirm_quit_modal_enter_quits_and_esc_cancels() {
+        let td = tempfile::tempdir().unwrap();
+        let mut state = make_state(td.path(), vec![]);
+        state.playlists_dirty = true;
+
+        // Open confirm quit modal.
+        let mut screen = MainMenuScreen::default();
+        let action = screen.on_key(&state, key('q')).unwrap();
+        assert_eq!(
+            action,
+            Some(Action::SetStatus("confirm quit...".to_string()))
+        );
+        assert!(screen.view(&state).confirm_quit.is_some());
+
+        // Esc cancels and clears status.
+        let action = screen
+            .on_key(&state, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
+            .unwrap();
+        assert_eq!(action, Some(Action::ClearStatus));
+        assert!(screen.view(&state).confirm_quit.is_none());
+
+        // Open again; Enter confirms quit.
+        let _ = screen.on_key(&state, key('q')).unwrap();
+        let action = screen
+            .on_key(&state, KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .unwrap();
+        assert_eq!(action, Some(Action::Quit));
+        assert!(screen.view(&state).confirm_quit.is_none());
+    }
+
+    #[test]
+    fn key_5_does_not_trigger_play_or_exit() {
+        let td = tempfile::tempdir().unwrap();
+        let state = make_state(td.path(), vec![]);
+
+        let mut screen = MainMenuScreen::default();
+        let action = screen.on_key(&state, key('5')).unwrap();
+        assert_eq!(
+            action, None,
+            "UX-001 regression guard: '5' must not trigger play (Enter/Space) or exit (Esc/q)"
+        );
+    }
+
+    #[test]
+    fn key_0_does_not_trigger_play_or_exit() {
+        let td = tempfile::tempdir().unwrap();
+        let state = make_state(td.path(), vec![]);
+
+        let mut screen = MainMenuScreen::default();
+        let action = screen.on_key(&state, key('0')).unwrap();
+        assert_eq!(
+            action, None,
+            "UX-001 regression guard: '0' must not trigger exit (Esc/q) or play (Enter/Space)"
+        );
     }
 
     #[test]

@@ -44,6 +44,7 @@ pub enum Action {
     RescanLibrary,
 
     // Playlist mutations
+    SavePlaylists,
     CreatePlaylist {
         name: String,
     },

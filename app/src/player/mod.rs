@@ -144,6 +144,17 @@ pub enum PlayerCommand {
         tracks: Vec<PathBuf>,
         start_index: usize,
     },
+    /// Replace the in-memory queue with `tracks` while trying to preserve the
+    /// currently playing/paused sink when the current file is still present.
+    ///
+    /// If `current_path` is found in `tracks` and the engine is not Stopped, the
+    /// queue is rebuilt (respecting shuffle) and the position updated without
+    /// recreating the sink. Otherwise, this falls back to a normal queue load
+    /// starting at 0 (which restarts playback).
+    ResyncQueueAfterLibraryChange {
+        tracks: Vec<PathBuf>,
+        current_path: PathBuf,
+    },
     /// Communicates UI activity state to the player so it can decide
     /// how frequently to emit `PlayerSnapshot`s.
     SetUiActivity {
@@ -488,6 +499,47 @@ impl Engine {
                     self.stop();
                     return Ok(());
                 }
+                let start_pos = self.queue.pos_in_order().unwrap_or(0);
+                self.play_from_pos_with_skip(start_pos, SeekDirection::Forward)
+            }
+            PlayerCommand::ResyncQueueAfterLibraryChange {
+                tracks,
+                current_path,
+            } => {
+                if tracks.is_empty() {
+                    self.stop();
+                    return Ok(());
+                }
+
+                let start_index = tracks.iter().position(|p| p == &current_path);
+                let Some(start_index) = start_index else {
+                    // The current file is no longer present; fall back to a normal load.
+                    self.queue.load(tracks, 0, self.shuffle)?;
+                    if self.queue.is_empty() {
+                        self.stop();
+                        return Ok(());
+                    }
+                    let start_pos = self.queue.pos_in_order().unwrap_or(0);
+                    return self.play_from_pos_with_skip(start_pos, SeekDirection::Forward);
+                };
+
+                // Rebuild the queue around the currently playing file.
+                self.queue.load(tracks, start_index, self.shuffle)?;
+                if self.queue.is_empty() {
+                    self.stop();
+                    return Ok(());
+                }
+
+                // Preserve the sink if we are already playing/paused this exact path.
+                let sink_can_be_preserved = self.status != PlaybackStatus::Stopped
+                    && self.sink.is_some()
+                    && self.current_path.as_ref() == Some(&current_path);
+                if sink_can_be_preserved {
+                    // Keep status (Playing/Paused) and current duration/position intact.
+                    return Ok(());
+                }
+
+                // Otherwise, start playback at the computed queue position.
                 let start_pos = self.queue.pos_in_order().unwrap_or(0);
                 self.play_from_pos_with_skip(start_pos, SeekDirection::Forward)
             }
@@ -1339,5 +1391,106 @@ mod tests {
             other => panic!("expected snapshot event, got: {other:?}"),
         };
         assert_eq!(snap.volume_percent, 0);
+    }
+
+    #[test]
+    fn np_002_resync_queue_preserves_sink_when_current_track_still_exists() {
+        let backend = backend_ok();
+        let append_calls = backend.append_calls.clone();
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend), 75);
+
+        e.on_command(PlayerCommand::LoadQueue {
+            tracks: vec![p("a.ogg"), p("b.ogg"), p("c.ogg")],
+            start_index: 1,
+        })
+        .unwrap();
+        assert_eq!(e.status, PlaybackStatus::Playing);
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("b.ogg"))
+        );
+        let before_appends = append_calls.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Library changes reorder tracks, but the current file still exists.
+        e.on_command(PlayerCommand::ResyncQueueAfterLibraryChange {
+            tracks: vec![p("c.ogg"), p("b.ogg"), p("a.ogg")],
+            current_path: p("b.ogg"),
+        })
+        .unwrap();
+
+        // The queue should be rebuilt around the same current path, without restarting playback.
+        assert_eq!(e.status, PlaybackStatus::Playing);
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("b.ogg"))
+        );
+        assert_eq!(e.queue.current_index(), Some(1));
+        let after_appends = append_calls.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            after_appends, before_appends,
+            "resync should not append/decode (no restart) when sink can be preserved"
+        );
+    }
+
+    #[test]
+    fn np_002_resync_queue_falls_back_to_load_when_current_track_missing_shuffle_off_starts_at_0() {
+        let backend = backend_ok();
+        let append_calls = backend.append_calls.clone();
+        let mut e = Engine::new_with_backend(false, RepeatMode::Off, Box::new(backend), 75);
+
+        // Establish "playing" state so the command exercises a realistic refresh-while-playing path.
+        e.on_command(PlayerCommand::LoadQueue {
+            tracks: vec![p("x.ogg")],
+            start_index: 0,
+        })
+        .unwrap();
+        let before_appends = append_calls.load(std::sync::atomic::Ordering::Relaxed);
+
+        e.on_command(PlayerCommand::ResyncQueueAfterLibraryChange {
+            tracks: vec![p("a.ogg"), p("b.ogg")],
+            current_path: p("missing.ogg"),
+        })
+        .unwrap();
+
+        assert_eq!(e.status, PlaybackStatus::Playing);
+        assert_eq!(e.queue.current_index(), Some(0));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
+        let after_appends = append_calls.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            after_appends > before_appends,
+            "fallback should restart playback (append/decode) when current track is missing"
+        );
+    }
+
+    #[test]
+    fn np_002_resync_queue_falls_back_to_load_when_current_track_missing_shuffle_on_still_targets_track_index_0(
+    ) {
+        let backend = backend_ok();
+        let mut e = Engine::new_with_backend(true, RepeatMode::Off, Box::new(backend), 75);
+
+        // Ensure we are in a non-stopped state.
+        e.on_command(PlayerCommand::LoadQueue {
+            tracks: vec![p("x.ogg")],
+            start_index: 0,
+        })
+        .unwrap();
+
+        // Even with shuffle enabled, the fallback is a normal load starting at index 0 in `tracks`.
+        // PlayerQueue will shuffle the order but still position the current track at index 0.
+        e.on_command(PlayerCommand::ResyncQueueAfterLibraryChange {
+            tracks: vec![p("a.ogg"), p("b.ogg"), p("c.ogg")],
+            current_path: p("missing.ogg"),
+        })
+        .unwrap();
+
+        assert_eq!(e.status, PlaybackStatus::Playing);
+        assert_eq!(e.queue.current_index(), Some(0));
+        assert_eq!(
+            e.current_path.as_deref(),
+            Some(std::path::Path::new("a.ogg"))
+        );
     }
 }

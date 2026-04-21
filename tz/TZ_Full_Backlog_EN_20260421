@@ -1,0 +1,221 @@
+# Technical specification: OST Player enhancements (consolidated backlog)
+
+**Version:** 2026-04  
+**Scope:** logging, Now Playing and the player, legacy config, TUI (resize, main menu, hotkeys), playlists (dirty/save), indexing and scan performance.
+
+Key modules: `app/src/logging.rs`, `app/src/main.rs`, `app/src/tui/terminal.rs`, `app/src/tui/app.rs`, `app/src/tui/state.rs` (`PlaybackSource`), `app/src/tui/screens/main_menu.rs`, `app/src/player/mod.rs`, `app/src/player/queue.rs`, `app/src/indexer/scan.rs`, `app/src/indexer/io.rs`, `app/src/config/io.rs`, `app/src/tui/ui.rs`.
+
+---
+
+## Consolidated task checklist
+
+| # | Topic | Summary |
+|---|--------|---------|
+| 1 | Logging | DEFAULT policy: ERROR + narrow whitelist of domain INFO; remove noise |
+| 2 | Now Playing | Play guard: same source → screen only; changed scan → preserve/resync track |
+| 3 | Config | Legacy only for `playlists.yaml`; simplify `config.yaml` path |
+| 4 | TUI resize | Any `Resize` → immediate redraw |
+| 5 | Playlists | Persist only via Save; dirty + hint in main menu |
+| 6 | Main menu | Short labels, play/exit block, dynamic column widths |
+| 7 | UI hotkeys | Hints from `config.yaml` → `hotkeys.bindings` on all screens |
+| 8 | Indexing | Fingerprint + background debounced rescan for **re-entering** NP; faster scan |
+
+---
+
+## 1. Logging
+
+### 1.1. Levels in config, default DEFAULT
+
+- **Requirement:** levels are set in `config.yaml` (`logging.default_level`); default is `default` (`LoggingLevel::Default` in `app/src/config/mod.rs`).
+- **Current:** `build_env_filter` without `RUST_LOG` sets `ost_player=info` for Default (mapping in `app/src/logging.rs`), so **all** crate `tracing::info!` messages pass through.
+- **Goal (DEFAULT policy):** by default the file should use **global ERROR/FATAL** and a **narrow whitelist** of domain events that change configuration, **without** other INFO (including the startup dump in `main.rs`).
+- **Implementation (pick and document):** narrow `EnvFilter` by `target`/modules **or** move off-target messages to `debug!`/`trace!`; `RUST_LOG` is a full override (`app/src/config/io.rs`).
+
+### 1.2. Domain INFO (whitelist)
+
+- On DEFAULT, log only an agreed list: playlists (CRUD, overwrite, load with context), settings that affect persisted config.
+- Align messages like “folder added/removed”, “folder setting changed” (`app/src/tui/app.rs`) with a single policy: in whitelist or not.
+
+### 1.3. Rotation and retention
+
+- **Status:** implemented — 3 files per month, delete old by `retention_days` (`app/src/logging.rs`).
+
+### 1.4. Comments in config
+
+- **Status:** help text in preamble (`app/src/config/io.rs`).
+
+---
+
+## 2. Now Playing: return from main menu and preserving playback
+
+### 2.1. Same source — no restart
+
+- **Requirement:** on **Play** from the main menu (`PlayerLoadFromLibrary`), if folder configuration + active playlist match playback that is already running — **only switch to Now Playing**, without scan and without `LoadQueue`.
+- **Current:** always scans (`app.rs` ~388–414). Guard exists for `LoadPlaylist`, but not for Play from library.
+- **Implementation:** compare `playback_source` (`app/src/tui/state.rs`) with `PlaybackSource::from_active_playlist_or_folders(...)`, status `Playing`/`Paused`. On match — `screen = Now Playing`, no `request_scan` / `load_queue_from_current_library`.
+
+### 2.2. Basic boundaries
+
+- Source match + `Playing`/`Paused` → navigation only.
+- `Stopped` → normal Play → scan → `load_queue_from_current_library`.
+
+### 2.3. Changed scan, same file still in the set — do not interrupt the track
+
+- **Requirement:** after changing `scan_depth` / `min_size` etc., `PlaybackSource` may diverge, but if the **current file** is still in the new track list — **do not** interrupt playback (do not recreate the sink for the same path).
+- **Reason:** `LoadQueue` → `play_at_pos` always creates a new sink (`app/src/player/mod.rs`).
+- **Order:** first finish scan and have current `LibraryIndex`, then compare paths, then player branch.
+
+**Architecture:**
+
+1. After `apply_scan_result`, build the list of paths for the new library; take current path from player snapshot.
+2. If not `Stopped` and path **exists** in the list — new player command (working name `ResyncQueueAfterLibraryChange`): update `PlayerQueue`, set position to current file in the new order (shuffle), **do not** call `play_at_pos` if path matches current decoding.
+3. If path **missing** — normal `LoadQueue` (**2.3.1**).
+4. UX: Next/Prev and “N/M” follow the new queue.
+
+**Edge cases:** duplicate paths; `Paused`; correct position under shuffle.
+
+### 2.3.1. Fallback: file dropped from the set
+
+- Normal `LoadQueue`.
+- **Start index** (`PlayerQueue::load`): shuffle **off** → `start_index = 0`; shuffle **on** → `random_uniform(0 .. tracks.len())`. RNG testable (seed/injection).
+
+### 2.3.2. Why Play feels “slow” (addendum to sec. 8.0)
+
+- Full rescan before queue (FIX-004), scan depth, `metadata`/canonicalize, external factors (disk, AV).
+
+### Dependency on sec. 5 (dirty)
+
+- Single source of truth for expected scan: in-memory config vs file.
+
+---
+
+## 3. Legacy compatibility
+
+- **Requirement:** backward compatibility of format — **only** for `playlists.yaml` (`app/src/playlists/mod.rs`). `config.yaml` may be recreated without perpetual support for old schemas.
+- **Goal:** narrow legacy to one-time migration on load; do not inflate save path; update preamble comments in `app/src/config/io.rs`.
+
+---
+
+## 4. TUI: resize
+
+- **Requirement:** any terminal size change **immediately** redraws the UI (do not wait 1 s / 5 s).
+- **Current:** `Event::Resize` in `app/src/tui/terminal.rs` sets `needs_redraw` mainly on minimize change (0×0).
+- **Goal:** on every `Resize` — `needs_redraw = true` (+ run `terminal.resize()` when needed for ratatui).
+
+---
+
+## 5. Playlists: explicit save and dirty
+
+### 5.1. Save
+
+- Changes to playlist contents (including per-folder `min_size`) in `playlists.yaml` **only** via explicit **Save** in the Playlists section.
+- **Current:** autosave in `app.rs` on Create/Rename/Delete/Overwrite/LoadPlaylist.
+- **Goal:** in-memory model + Save; policy on exit without save (prompt / discard).
+
+### 5.2. Main menu
+
+- When dirty: **Playlists** item highlighted, hint `(save changes)`, muted green (`draw_main_menu` in `app/src/tui/ui.rs`).
+
+---
+
+## 6. Main menu: text and layout
+
+- Shorten **three** item labels (`main_menu_actions_block`, numeric mapping).
+- Remove **5** and **0** from the numeric block; separate block **Enter/Space → play**, **Esc/q → exit**; align.
+- Actions column width — content-driven without wrapping; extra width goes to folder list / Active playlist column (currently 60/40 in `ui.rs`).
+- Align keys in `main_menu.rs` (currently `5`/`0` = Play/Quit).
+
+---
+
+## 7. Hotkey hints
+
+- Do not hardcode global action hints: `hotkeys.bindings` — play/pause, next/prev, shuffle, repeat, volume up/down.
+- **Current:** Now Playing — from config; other screens — static strings.
+- **Goal:** shared string assembly (like `now_playing_keys_block` + `hotkey_hints`), reuse; placeholder for missing bindings.
+
+---
+
+## 8. Indexing: background scan for re-entering Now Playing
+
+**Scope:** background rescan and fingerprint — for **re-entering** Now Playing and sec. 2.3 scenarios so the track list is ready **when possible** by the time you return. Not necessarily universal preload before **every** first Play from the main menu (optional follow-up).
+
+**Traversal speed:** parallelize across roots, fewer syscalls; optional increments after profiling.
+
+### 8.0. Why scan feels noticeably slow
+
+1. **FIX-004:** before `LoadQueue` from library — **mandatory full rescan** (`app.rs`, comment at `PlayerLoadFromLibrary`). Test `fix_004_play_when_scan_not_running_starts_scan_and_load_queue`: `LoadQueue` only after scan completes.
+2. Startup `index.yaml` cache does not cancel this rescan on first Play.
+3. **OneLevel / Recursive** increase I/O volume on top of the same rule.
+4. “It used to be faster” — possibly fewer files / different policy in older versions.
+
+### 8.1–8.2. Fingerprint
+
+- Deterministic indexer input fingerprint (paths, `scan_depth`, effective min size, filters).
+- Store `index_fingerprint` with the index.
+- Freshness for **re-entry** / sec. 2.3: if fingerprint matches — branches without blocking scan. First Play may remain under FIX-004 until a separate decision.
+
+### 8.3. Background rescan (narrow)
+
+- Triggers: depth/`min_size` change for folders in active set; optionally add/remove on “edit → return to NP” flow.
+- Debounce 100–300 ms; cancel stale in-flight; on completion — update `state.library`, `persist_index_best_effort`.
+
+### 8.4. Stale index
+
+- Fingerprint mismatch + background not ready — wait or blocking scan (as today).
+
+### 8.5. Speed up `scan_library_folders`
+
+- Parallel roots; canonicalize cache; increments — optional.
+
+### 8.6. Relationships
+
+- Sec. 2.3 needs a ready list — background prepares it before re-entry.  
+- Sec. 5 — same config for fingerprint.
+
+---
+
+## Dependencies (logical diagram)
+
+```mermaid
+flowchart LR
+  logging[Logging DEFAULT]
+  idx[Fingerprint bg re-entry NP]
+  np[MainMenu Play guard]
+  preserve[Resync preserve sink]
+  resize[Resize redraw]
+  dirty[Playlists dirty Save]
+  ui[Main menu layout hotkeys]
+  logging --> np
+  idx --> preserve
+  np --> preserve
+  resize --> ui
+  dirty --> idx
+  dirty --> preserve
+```
+
+---
+
+## Acceptance criteria (summary)
+
+- DEFAULT logging matches whitelist; no extraneous INFO outside it.
+- With same `PlaybackSource` and active playback, Play from main menu only opens Now Playing without scan/queue.
+- After scan parameter change: if current track remains in the set — no interruption; otherwise fallback 2.3.1 after index is ready.
+- Any resize → immediate draw.
+- Playlists: Save to disk only; dirty visible in main menu.
+- UI hotkeys aligned with `config.yaml` on all screens.
+- Main menu: shortened labels, separate play/exit blocks, dynamic width.
+- Legacy config per sec. 3.
+- Re-entry / sec. 2.3: fingerprint match without blocking scan (sec. 8.4); first Play may follow FIX-004 until a separate decision.
+
+---
+
+## Rollout order (recommended)
+
+1. Resize (local, low risk).  
+2. Logging (policy + levels).  
+3. Main menu UX + hotkeys from config.  
+4. Playlists dirty + Save.  
+5. Player: `ResyncQueue…` + branching in `TuiApp` after scan (2.3, 2.3.1).  
+6. Main-menu Play guard (2.1).  
+7. Fingerprint + background rescan for re-entry (8).  
+8. Legacy `config.yaml` per sec. 3.

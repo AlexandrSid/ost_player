@@ -65,14 +65,25 @@ impl IndexReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryIndex {
     pub schema_version: u32,
+    /// Deterministic fingerprint of the *inputs* used to build this index (roots + scan params).
+    ///
+    /// Used to decide whether the current in-memory/persisted index is "fresh enough" to reuse
+    /// without blocking on a scan.
+    #[serde(default)]
+    pub index_fingerprint: String,
     pub tracks: Vec<TrackEntry>,
     pub report: IndexReport,
+}
+
+impl LibraryIndex {
+    pub const SCHEMA_VERSION: u32 = 2;
 }
 
 impl Default for LibraryIndex {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: Self::SCHEMA_VERSION,
+            index_fingerprint: String::new(),
             tracks: Vec::new(),
             report: IndexReport::default(),
         }

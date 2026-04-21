@@ -120,8 +120,8 @@ settings:
   repeat: all
   supported_extensions: ["mp3", "ogg"]
 folders:
-  - "C:\\Music"
-  - "D:\\Other"
+  - path: "C:\\Music"
+  - path: "D:\\Other"
 "#;
     fs::write(&paths.config_path, yaml).unwrap();
 
@@ -182,6 +182,43 @@ settings:
             assert!(
                 message.contains("supported_extensions"),
                 "message was: {message}"
+            );
+        }
+        other => panic!("expected AppError::Config, got {other:?}"),
+    }
+}
+
+#[test]
+fn load_or_create_rejects_legacy_folders_vec_string_in_config_yaml() {
+    let dir = tempdir().unwrap();
+    let paths = make_paths_in(dir.path().to_path_buf());
+    fs::create_dir_all(&paths.data_dir).unwrap();
+
+    // Legacy config format used to allow `folders: ["C:\\Music", ...]`.
+    // New stance: legacy compat is ONLY for playlists.yaml, not config.yaml.
+    let yaml = r#"
+schema_version: 1
+settings:
+  supported_extensions: [mp3, ogg]
+folders: ["C:\\Music", "D:\\Other"]
+"#;
+    fs::write(&paths.config_path, yaml).unwrap();
+
+    let err = config_io::load_or_create(&paths).unwrap_err();
+    match err {
+        AppError::Config { message } => {
+            assert!(
+                message.contains("failed to parse"),
+                "message was: {message}"
+            );
+            assert!(
+                message.contains("config.yaml"),
+                "message should mention file name; message was: {message}"
+            );
+            assert!(
+                message.to_lowercase().contains("folders")
+                    || message.to_lowercase().contains("invalid type"),
+                "message should hint at folders/type mismatch; message was: {message}"
             );
         }
         other => panic!("expected AppError::Config, got {other:?}"),

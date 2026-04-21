@@ -45,6 +45,7 @@ pub struct AppState {
     pub paths: AppPaths,
     pub cfg: AppConfig,
     pub playlists: PlaylistsFile,
+    pub playlists_dirty: bool,
     pub library: LibraryIndex,
 
     pub screen: Screen,
@@ -78,6 +79,7 @@ impl AppState {
             paths,
             cfg,
             playlists,
+            playlists_dirty: false,
             library,
             screen: Screen::MainMenu,
             status: None,

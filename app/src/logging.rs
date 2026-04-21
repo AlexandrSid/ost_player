@@ -4,8 +4,13 @@ use crate::paths::AppPaths;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::time::{Duration, SystemTime};
 use tracing_subscriber::EnvFilter;
+
+pub const PERSIST_LOG_TARGET: &str = "ost_player::persist";
+
+static INVALID_RUST_LOG_WARNING_ONCE: Once = Once::new();
 
 pub struct LoggingGuards {
     _file_guard: tracing_appender::non_blocking::WorkerGuard,
@@ -41,28 +46,60 @@ pub fn init(paths: &AppPaths, cfg: &AppConfig) -> AppResult<LoggingGuards> {
 
 fn build_env_filter(cfg: &AppConfig) -> EnvFilter {
     // If `RUST_LOG` is set, give the operator full control.
-    if std::env::var("RUST_LOG")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
-    {
-        return EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    if let Ok(v) = std::env::var("RUST_LOG") {
+        if !v.trim().is_empty() {
+            match EnvFilter::try_from_default_env() {
+                Ok(f) => return f,
+                Err(e) => {
+                    // Tracing isn't initialized yet; emit a single clear warning without recursion.
+                    INVALID_RUST_LOG_WARNING_ONCE.call_once(|| {
+                        eprintln!(
+                            "warning: invalid RUST_LOG={v:?} ({e}); falling back to logging.default_level={:?}",
+                            cfg.logging.default_level
+                        );
+                    });
+                }
+            }
+        }
     }
 
-    let app_level = match cfg.logging.default_level {
-        LoggingLevel::Default => "info",
-        LoggingLevel::Debug => "debug",
-        LoggingLevel::Trace => "trace",
-    };
-
-    // Policy:
-    // - Always keep global ERROR on (all crates).
-    // - Allow ost_player domain events at chosen level.
-    // - Suppress noisy dependencies by default.
-    // Note: users can override all of this via RUST_LOG.
-    let filter = format!(
-        "error,ost_player={app_level},rodio=error,symphonia=error,symphonia_bundle_mp3=error,symphonia_bundle_ogg=error"
-    );
-    EnvFilter::new(filter)
+    match cfg.logging.default_level {
+        LoggingLevel::Default => {
+            // Policy (DEFAULT):
+            // - Always keep global ERROR on (all crates).
+            // - Allow a narrow INFO whitelist for user-visible persistence events.
+            // - Suppress noisy dependencies by default.
+            //
+            // Note: users can override all of this via RUST_LOG.
+            //
+            // Whitelist is intentionally target-scoped to keep runtime overhead minimal
+            // and the policy easy to audit.
+            EnvFilter::new(
+                "error,\
+                 ost_player::persist=info,\
+                 rodio=error,\
+                 symphonia=error,\
+                 symphonia_bundle_mp3=error,\
+                 symphonia_bundle_ogg=error",
+            )
+        }
+        LoggingLevel::Debug => EnvFilter::new(
+            "error,\
+             ost_player=debug,\
+             rodio=error,\
+             symphonia=error,\
+             symphonia_bundle_mp3=error,\
+             symphonia_bundle_ogg=error",
+        ),
+        LoggingLevel::Trace => EnvFilter::new(
+            "error,\
+             ost_player=trace,\
+             rodio=error,\
+             symphonia=error,\
+             symphonia_bundle_mp3=error,\
+             symphonia_bundle_ogg=error",
+        ),
+    }
 }
 
 fn cleanup_old_logs(logs_dir: &Path, retention_days: u64) {
@@ -289,6 +326,130 @@ mod tests {
             assert!(s.contains("ost_player=debug"), "got: {s}");
             assert!(s.contains("rodio=error"), "got: {s}");
             assert!(s.contains("symphonia=error"), "got: {s}");
+        })
+    }
+
+    #[test]
+    fn build_env_filter_default_allows_only_whitelisted_info_targets() {
+        with_rust_log(None, || {
+            let cfg = AppConfig {
+                logging: crate::config::LoggingConfig {
+                    default_level: LoggingLevel::Default,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let f = build_env_filter(&cfg);
+            let s = f.to_string();
+            assert!(s.contains("error"), "got: {s}");
+            assert!(
+                s.contains("ost_player::persist=info"),
+                "expected whitelist; got: {s}"
+            );
+            assert!(
+                !s.contains("ost_player=info"),
+                "did not expect global ost_player=info on DEFAULT; got: {s}"
+            );
+        })
+    }
+
+    #[test]
+    fn build_env_filter_default_matches_expected_policy_directives() {
+        with_rust_log(None, || {
+            let cfg = AppConfig {
+                logging: crate::config::LoggingConfig {
+                    default_level: LoggingLevel::Default,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let built = build_env_filter(&cfg).to_string();
+            let expected = EnvFilter::new(
+                "error,\
+                 ost_player::persist=info,\
+                 rodio=error,\
+                 symphonia=error,\
+                 symphonia_bundle_mp3=error,\
+                 symphonia_bundle_ogg=error",
+            )
+            .to_string();
+
+            assert_eq!(
+                built, expected,
+                "DEFAULT logging policy changed unexpectedly; built={built:?}"
+            );
+        })
+    }
+
+    #[test]
+    fn build_env_filter_invalid_rust_log_falls_back_to_config_policy() {
+        // Intentionally invalid EnvFilter syntax.
+        with_rust_log(Some("ost_player==warn"), || {
+            let cfg = AppConfig {
+                logging: crate::config::LoggingConfig {
+                    default_level: LoggingLevel::Debug,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let s = build_env_filter(&cfg).to_string();
+            assert!(s.contains("error"), "got: {s}");
+            assert!(s.contains("ost_player=debug"), "got: {s}");
+        })
+    }
+
+    #[test]
+    fn build_env_filter_default_does_not_enable_info_for_non_whitelisted_targets() {
+        // This test asserts behavior by checking that the filter string does not
+        // contain directives that would enable INFO for other targets.
+        //
+        // (We intentionally avoid wiring up a full tracing subscriber here; that is
+        // covered elsewhere by integration tests.)
+        with_rust_log(None, || {
+            let cfg = AppConfig {
+                logging: crate::config::LoggingConfig {
+                    default_level: LoggingLevel::Default,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let s = build_env_filter(&cfg).to_string();
+
+            assert!(
+                !s.contains("ost_player=info")
+                    && !s.contains("ost_player=debug")
+                    && !s.contains("ost_player=trace"),
+                "did not expect broad ost_player enablement on DEFAULT; got: {s}"
+            );
+            assert!(
+                !s.contains("rodio=info") && !s.contains("symphonia=info"),
+                "did not expect dependency INFO enablement on DEFAULT; got: {s}"
+            );
+        })
+    }
+
+    #[test]
+    fn build_env_filter_debug_trace_keep_dependency_suppression() {
+        with_rust_log(None, || {
+            for (level, want) in [
+                (LoggingLevel::Debug, "ost_player=debug"),
+                (LoggingLevel::Trace, "ost_player=trace"),
+            ] {
+                let cfg = AppConfig {
+                    logging: crate::config::LoggingConfig {
+                        default_level: level,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let s = build_env_filter(&cfg).to_string();
+
+                assert!(s.contains("error"), "got: {s}");
+                assert!(s.contains(want), "got: {s}");
+                assert!(s.contains("rodio=error"), "got: {s}");
+                assert!(s.contains("symphonia=error"), "got: {s}");
+            }
         })
     }
 

@@ -11,7 +11,7 @@ fn main() -> anyhow::Result<()> {
     ost_player::windows_icon::best_effort_set_console_window_icon_from_resource_id(1);
 
     let pls = playlists::io::load_or_create(&paths)?;
-    tracing::info!(
+    tracing::debug!(
         min_size_bytes = cfg.settings.min_size_bytes,
         shuffle = cfg.settings.shuffle,
         repeat = ?cfg.settings.repeat,

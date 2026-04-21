@@ -123,8 +123,8 @@ settings:
   supported_extensions: [mp3]
 folders: []
 audio:
-  default_volume_percent: 42
-  volume_step_percent: 7
+  volume_default_percent: 42
+  volume_available_percent: [0, 7, 14, 21, 28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 100]
 "#;
 
     let cfg: AppConfig = parse_yaml(raw);

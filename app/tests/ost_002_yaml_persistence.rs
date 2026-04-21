@@ -132,7 +132,7 @@ fn config_roundtrip_preserves_unknown_top_level_fields() {
     let yaml = r#"
 schema_version: 1
 settings:
-  min_size_bytes: 1000000
+  min_size_kb: 976
   shuffle: false
   repeat: off
   supported_extensions: ["mp3", "ogg"]
@@ -157,12 +157,11 @@ unknown_top_level:
         Some(123)
     );
 
-    // Migration-on-save: write the new field only.
     assert_eq!(
         v.get("settings")
             .and_then(|s| s.get("min_size_kb"))
             .and_then(Value::as_i64),
-        Some(976) // 1_000_000 / 1024 rounds down
+        Some(976)
     );
     assert!(
         v.get("settings")
@@ -302,6 +301,37 @@ fn playlists_load_or_create_creates_file_with_defaults() {
     assert_eq!(pls.schema_version, 1);
     assert!(pls.active.is_none());
     assert!(pls.playlists.is_empty());
+}
+
+#[test]
+fn playlists_load_or_create_accepts_legacy_folders_vec_string() {
+    let dir = tempdir().unwrap();
+    let paths = make_paths_in(dir.path().to_path_buf());
+    fs::create_dir_all(&paths.data_dir).unwrap();
+
+    // Legacy playlists format: `folders: ["C:\\Music", ...]` (strings, not objects).
+    // This compat remains supported for playlists.yaml.
+    let yaml = r#"
+schema_version: 1
+active: null
+playlists:
+  - id: "p1"
+    name: "My"
+    folders: ["C:\\Music", "D:\\OST"]
+"#;
+    fs::write(&paths.playlists_path, yaml).unwrap();
+
+    let pls = playlists_io::load_or_create(&paths).expect("legacy playlists must load");
+    assert_eq!(pls.playlists.len(), 1);
+    assert_eq!(pls.playlists[0].folders.len(), 2);
+    assert_eq!(
+        pls.playlists[0].folders[0],
+        FolderEntry::new("C:\\Music".to_string())
+    );
+    assert_eq!(
+        pls.playlists[0].folders[1],
+        FolderEntry::new("D:\\OST".to_string())
+    );
 }
 
 #[test]
