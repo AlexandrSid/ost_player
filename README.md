@@ -1,7 +1,7 @@
 
 ## OST_Player — Portable TUI OST Player (Windows 11)
 A lightweight, portable terminal-based music/OST player. It plays audio from your game/music folders, keeps all data next to the executable in `data/`, and supports **global hotkeys** so you can control playback even when the terminal is not focused.
-- **Download (v0.1.0)**: [`ost_player.exe`](https://github.com/AlexandrSid/ost_player/releases/download/v0.1.0/ost_player.exe)
+- **Download (v0.2.0)**: [`ost_player.exe`](https://github.com/AlexandrSid/ost_player/releases/download/v0.2.0/ost_player.exe)
 ---
 ## Release notes (EN)
 `ost_player` is a **portable TUI music/OST player** for Windows 11. It runs from a folder, stores all data next to the executable in `data/`, plays in the background, and is controlled via **global hotkeys** (works even when the terminal window is not focused).
