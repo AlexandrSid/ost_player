@@ -1,3 +1,4 @@
+use crate::config::MainMenuCommand;
 use crate::error::AppResult;
 use crate::tui::action::{Action, Screen};
 use crate::tui::state::AppState;
@@ -85,11 +86,55 @@ impl MainMenuScreen {
     }
 
     fn handle_normal_key(&mut self, state: &AppState, key: KeyEvent) -> Option<Action> {
+        if let KeyCode::Char(ch) = key.code {
+            if let Some(digit) = ch.to_digit(10) {
+                let digit = digit as u8;
+                if (1..=9).contains(&digit) {
+                    if let Some(map) = state.cfg.tui.resolved_main_menu_numeric_mapping() {
+                        if let Some(cmd) = map[(digit - 1) as usize] {
+                            return self.dispatch_main_menu_command(state, cmd);
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('0') => Some(Action::Quit),
             KeyCode::Up => Some(Action::SelectFolderDelta(-1)),
             KeyCode::Down => Some(Action::SelectFolderDelta(1)),
             KeyCode::Char('1') | KeyCode::Char('a') => {
+                self.dispatch_main_menu_command(state, MainMenuCommand::AddFolder)
+            }
+            KeyCode::Char('2') | KeyCode::Char('d') => {
+                self.dispatch_main_menu_command(state, MainMenuCommand::RemoveSelectedFolder)
+            }
+            KeyCode::Char('3') | KeyCode::Char('t') => self
+                .dispatch_main_menu_command(state, MainMenuCommand::CycleSelectedFolderScanDepth),
+            KeyCode::Char('4') | KeyCode::Char('c') => self.dispatch_main_menu_command(
+                state,
+                MainMenuCommand::SetSelectedFolderCustomMinSizeKb,
+            ),
+            KeyCode::Char('5') | KeyCode::Enter | KeyCode::Char(' ') => {
+                self.dispatch_main_menu_command(state, MainMenuCommand::Play)
+            }
+            KeyCode::Char('6') | KeyCode::Char('s') => Some(Action::Navigate(Screen::Settings)),
+            KeyCode::Char('7') | KeyCode::Char('p') => Some(Action::Navigate(Screen::Playlists)),
+            KeyCode::Char('8') | KeyCode::Char('r') => {
+                self.dispatch_main_menu_command(state, MainMenuCommand::RescanLibrary)
+            }
+            _ => None,
+        }
+    }
+
+    fn dispatch_main_menu_command(
+        &mut self,
+        state: &AppState,
+        cmd: MainMenuCommand,
+    ) -> Option<Action> {
+        match cmd {
+            MainMenuCommand::AddFolder => {
                 self.add_folder = Some(TextInput::new(
                     "Add folder (absolute path)",
                     "",
@@ -97,7 +142,7 @@ impl MainMenuScreen {
                 ));
                 Some(Action::SetStatus("typing folder path...".to_string()))
             }
-            KeyCode::Char('2') | KeyCode::Char('d') => {
+            MainMenuCommand::RemoveSelectedFolder => {
                 if state.cfg.folders.is_empty() {
                     return Some(Action::SetStatus("no folders to remove".to_string()));
                 }
@@ -107,14 +152,14 @@ impl MainMenuScreen {
                 ));
                 Some(Action::SetStatus("confirm removal...".to_string()))
             }
-            KeyCode::Char('3') | KeyCode::Char('t') => {
+            MainMenuCommand::CycleSelectedFolderScanDepth => {
                 if state.cfg.folders.is_empty() {
                     Some(Action::SetStatus("no folders to toggle".to_string()))
                 } else {
                     Some(Action::ToggleFolderRootOnlyAt(state.main_selected_folder))
                 }
             }
-            KeyCode::Char('4') | KeyCode::Char('c') => {
+            MainMenuCommand::SetSelectedFolderCustomMinSizeKb => {
                 if state.cfg.folders.is_empty() {
                     return Some(Action::SetStatus("no folders to edit".to_string()));
                 }
@@ -142,12 +187,10 @@ impl MainMenuScreen {
                     "editing custom min_size_kb...".to_string(),
                 ))
             }
-            KeyCode::Char('5') | KeyCode::Enter | KeyCode::Char(' ') => {
-                Some(Action::PlayerLoadFromLibrary { start_index: 0 })
-            }
-            KeyCode::Char('6') | KeyCode::Char('s') => Some(Action::Navigate(Screen::Settings)),
-            KeyCode::Char('7') | KeyCode::Char('p') => Some(Action::Navigate(Screen::Playlists)),
-            KeyCode::Char('8') | KeyCode::Char('r') => {
+            MainMenuCommand::Play => Some(Action::PlayerLoadFromLibrary { start_index: 0 }),
+            MainMenuCommand::Settings => Some(Action::Navigate(Screen::Settings)),
+            MainMenuCommand::Playlists => Some(Action::Navigate(Screen::Playlists)),
+            MainMenuCommand::RescanLibrary => {
                 if state.cfg.folders.is_empty() {
                     Some(Action::SetStatus(
                         "no folders configured to scan".to_string(),
@@ -156,7 +199,6 @@ impl MainMenuScreen {
                     Some(Action::RescanLibrary)
                 }
             }
-            _ => None,
         }
     }
 
@@ -183,6 +225,7 @@ pub struct MainMenuView<'a> {
 mod tests {
     use super::*;
     use crate::config::{AppConfig, FolderEntry};
+    use crate::config::{MainMenuCommand, MainMenuNumericBinding, TuiConfig};
     use crate::indexer::LibraryIndex;
     use crate::paths::AppPaths;
     use crate::playlists::PlaylistsFile;
@@ -374,6 +417,20 @@ mod tests {
             assert!(v.add_folder.is_some());
             assert!(v.confirm_remove.is_none());
         }
+    }
+
+    #[test]
+    fn when_numeric_mapping_is_absent_digit_1_keeps_default_behavior_add_folder() {
+        let td = tempfile::tempdir().unwrap();
+        let state = make_state(td.path(), vec![]);
+
+        let mut screen = MainMenuScreen::default();
+        let action = screen.on_key(&state, key('1')).unwrap();
+        assert!(
+            matches!(action, Some(Action::SetStatus(_))),
+            "expected default main menu digit '1' to start add-folder flow when mapping is absent"
+        );
+        assert!(screen.view(&state).add_folder.is_some());
     }
 
     #[test]
@@ -650,5 +707,45 @@ mod tests {
         let action = screen.on_key(&state, key('3')).unwrap();
 
         assert!(matches!(action, Some(Action::SetStatus(_))));
+    }
+
+    #[test]
+    fn numeric_mapping_overrides_digit_1_to_dispatch_mapped_command() {
+        let td = tempfile::tempdir().unwrap();
+        let mut state = make_state(td.path(), vec![]);
+        state.cfg.tui = TuiConfig {
+            main_menu_numeric_mapping: Some(vec![MainMenuNumericBinding {
+                key: 1,
+                command: MainMenuCommand::Playlists,
+            }]),
+            extra: Default::default(),
+        };
+
+        let mut screen = MainMenuScreen::default();
+        let action = screen.on_key(&state, key('1')).unwrap();
+
+        assert_eq!(action, Some(Action::Navigate(Screen::Playlists)));
+    }
+
+    #[test]
+    fn numeric_mapping_with_gaps_does_not_fallback_to_default_digit_behavior() {
+        let td = tempfile::tempdir().unwrap();
+        let mut state = make_state(td.path(), vec![]);
+        state.cfg.tui = TuiConfig {
+            // Only bind key 1. Key 2 is intentionally absent.
+            main_menu_numeric_mapping: Some(vec![MainMenuNumericBinding {
+                key: 1,
+                command: MainMenuCommand::Playlists,
+            }]),
+            extra: Default::default(),
+        };
+
+        let mut screen = MainMenuScreen::default();
+        let action = screen.on_key(&state, key('2')).unwrap();
+
+        assert_eq!(
+            action, None,
+            "when numeric mapping is present but a digit is not mapped, it should be ignored (no fallback)"
+        );
     }
 }

@@ -4,6 +4,7 @@ use crate::tui::app::TuiApp;
 use crate::tui::scan_indicator::scan_depth_indicator_fixed;
 use crate::tui::widgets::{ConfirmDialog, TextInput};
 use crate::{config::effective_min_size_kb_for_folder, config::FolderEntry};
+use crate::{config::TapHoldBinding, hotkeys::hints as hotkey_hints};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -94,22 +95,7 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
     }
     frame.render_stateful_widget(list, cols[0], &mut list_state);
 
-    let menu = [
-        "Main menu:",
-        "  1 / a  add folder",
-        "  2 / d  remove selected folder",
-        "  3 / t  cycle scan depth for selected folder",
-        "  4 / c  set custom min_size for selected folder",
-        "  5 / Enter / Space  play",
-        "  6 / s  settings",
-        "  7 / p  playlists",
-        "  8 / r  rescan library",
-        "  0 / q  exit",
-        "",
-        "Selection:",
-        "  Up/Down",
-    ]
-    .join("\n");
+    let menu = main_menu_actions_block(&state.cfg);
     frame.render_widget(
         Paragraph::new(menu)
             .block(Block::default().title("Actions").borders(Borders::ALL))
@@ -124,6 +110,63 @@ fn draw_main_menu(frame: &mut Frame, area: Rect, app: &TuiApp) {
     } else if let Some(input) = v.custom_min_size_input {
         draw_text_input_modal(frame, input);
     }
+}
+
+fn main_menu_actions_block(cfg: &crate::config::AppConfig) -> String {
+    use crate::config::MainMenuCommand;
+
+    fn cmd_label_and_alpha_hint(cmd: MainMenuCommand) -> (&'static str, Option<&'static str>) {
+        match cmd {
+            MainMenuCommand::AddFolder => ("add folder", Some("a")),
+            MainMenuCommand::RemoveSelectedFolder => ("remove selected folder", Some("d")),
+            MainMenuCommand::CycleSelectedFolderScanDepth => {
+                ("cycle scan depth for selected folder", Some("t"))
+            }
+            MainMenuCommand::SetSelectedFolderCustomMinSizeKb => {
+                ("set custom min_size for selected folder", Some("c"))
+            }
+            MainMenuCommand::Play => ("play", None),
+            MainMenuCommand::Settings => ("settings", Some("s")),
+            MainMenuCommand::Playlists => ("playlists", Some("p")),
+            MainMenuCommand::RescanLibrary => ("rescan library", Some("r")),
+        }
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+
+    if let Some(map) = cfg.tui.resolved_main_menu_numeric_mapping() {
+        lines.push("Main menu (digits 1..9):".to_string());
+        for (idx, cmd) in map.iter().enumerate() {
+            let Some(cmd) = cmd else { continue };
+            let key = (idx as u8) + 1;
+            let (label, alpha) = cmd_label_and_alpha_hint(*cmd);
+            let extra = match (*cmd, alpha) {
+                (MainMenuCommand::Play, _) => " / Enter / Space".to_string(),
+                (_, Some(ch)) => format!(" / {ch}"),
+                _ => "".to_string(),
+            };
+            lines.push(format!("  {key}{extra}  {label}"));
+        }
+        lines.push("  0 / q  exit".to_string());
+    } else {
+        lines.extend([
+            "Main menu:".to_string(),
+            "  1 / a  add folder".to_string(),
+            "  2 / d  remove selected folder".to_string(),
+            "  3 / t  cycle scan depth for selected folder".to_string(),
+            "  4 / c  set custom min_size for selected folder".to_string(),
+            "  5 / Enter / Space  play".to_string(),
+            "  6 / s  settings".to_string(),
+            "  7 / p  playlists".to_string(),
+            "  8 / r  rescan library".to_string(),
+            "  0 / q  exit".to_string(),
+        ]);
+    }
+
+    lines.push("".to_string());
+    lines.push("Selection:".to_string());
+    lines.push("  Up/Down".to_string());
+    lines.join("\n")
 }
 
 fn draw_settings(frame: &mut Frame, area: Rect, app: &TuiApp) {
@@ -308,8 +351,9 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &TuiApp) {
 
     let last_error = state.last_error.as_deref().unwrap_or("(none)");
 
+    let keys = now_playing_keys_block(state);
     let text = format!(
-        "Now Playing\n\nStatus: {status}\nTrack:  {name}\nPath:   {path}\n\nQueue:  {pos_1}/{total}\nShuffle: {}\nRepeat: {}\nTime:   {track_pos} / {track_dur}\n\nLast error:\n  {last_error}\n\nKeys:\n  Space/Enter  play/pause\n  n / Right    next\n  p / Left     previous\n  x            stop\n  s            toggle shuffle\n  r            cycle repeat\n  Esc/q/m      back to main menu",
+        "Status: {status}\nTrack:  {name}\nPath:   {path}\n\nQueue:  {pos_1}/{total}\nShuffle: {}\nRepeat: {}\nTime:   {track_pos} / {track_dur}\n\nLast error:\n  {last_error}\n\n{keys}",
         if state.player.shuffle { "on" } else { "off" },
         match state.player.repeat {
             crate::config::RepeatMode::Off => "off",
@@ -324,6 +368,56 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &TuiApp) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn chord_hint_or_unknown(hint: Option<String>) -> String {
+    hint.unwrap_or_else(|| "?".to_string())
+}
+
+fn chord_hint(chord: &Option<crate::config::HotkeyChord>) -> Option<String> {
+    chord.as_ref().map(hotkey_hints::format_chord)
+}
+
+fn tap_hold_hint(b: &Option<TapHoldBinding>) -> Option<String> {
+    b.as_ref().map(hotkey_hints::format_tap_hold_binding)
+}
+
+fn now_playing_keys_block(state: &crate::tui::state::AppState) -> String {
+    let b = &state.cfg.hotkeys.bindings;
+
+    // Keep a stable, aligned layout: `<keys>` column + two spaces + `<action>`.
+    let entries: [(&str, Option<String>); 6] = [
+        ("play/pause", chord_hint(&b.play_pause)),
+        ("next", tap_hold_hint(&b.next)),
+        ("previous", tap_hold_hint(&b.prev)),
+        ("toggle shuffle", chord_hint(&b.shuffle_toggle)),
+        ("cycle repeat", chord_hint(&b.repeat_toggle)),
+        ("stop", Some("x".to_string())),
+    ];
+
+    let key_width = entries
+        .iter()
+        .map(|(_, k)| chord_hint_or_unknown(k.clone()).len())
+        .max()
+        .unwrap_or(1)
+        .max("Esc/q/m".len());
+
+    let mut out = String::new();
+    out.push_str("Keys:\n");
+    for (label, key) in entries {
+        let key = chord_hint_or_unknown(key);
+        out.push_str(&format!(
+            "  {:<key_width$}  {label}\n",
+            key,
+            key_width = key_width
+        ));
+    }
+    out.push_str(&format!(
+        "  {:<key_width$}  back to main menu",
+        "Esc/q/m",
+        key_width = key_width
+    ));
+    out
 }
 
 fn format_duration(d: std::time::Duration) -> String {
@@ -431,9 +525,13 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, FolderEntry};
+    use crate::config::{
+        AppConfig, FolderEntry, HotkeyChord, HotkeyKey, HotkeyModifier, MainMenuCommand,
+        MainMenuNumericBinding, TapHoldBinding, TuiConfig,
+    };
     use crate::paths::AppPaths;
     use crate::playlists::PlaylistsFile;
+    use crate::tui::action::Screen;
     use crate::tui::app::TuiApp;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -457,6 +555,17 @@ mod tests {
     fn buffer_as_text(buf: &Buffer) -> String {
         let mut out = String::new();
         let area = buf.area();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn buffer_rect_as_text(buf: &Buffer, area: Rect) -> String {
+        let mut out = String::new();
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
                 out.push_str(buf[(x, y)].symbol());
@@ -579,6 +688,25 @@ mod tests {
                 "expected action line for {phrase:?} to begin with a digit after trimming; got: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn main_menu_actions_block_uses_legacy_default_layout_when_numeric_mapping_is_absent() {
+        let cfg = AppConfig::default();
+
+        let s = main_menu_actions_block(&cfg);
+        assert!(
+            s.contains("Main menu:\n"),
+            "expected legacy main menu header when mapping is absent; got:\n{s}"
+        );
+        assert!(
+            s.contains("  1 / a  add folder"),
+            "expected legacy digit mapping line for '1' when mapping is absent; got:\n{s}"
+        );
+        assert!(
+            s.contains("  7 / p  playlists"),
+            "expected legacy digit mapping line for '7' when mapping is absent; got:\n{s}"
+        );
     }
 
     #[test]
@@ -833,6 +961,191 @@ mod tests {
         assert!(
             !text2.contains("Volume=75%"),
             "regression: updated status bar must not keep old Volume=75%; buffer was:\n{text2}"
+        );
+    }
+
+    #[test]
+    fn now_playing_does_not_duplicate_header_inside_content() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let cfg = AppConfig::default();
+        let mut app = TuiApp::new(paths, cfg, PlaylistsFile::default());
+        app.state.screen = Screen::NowPlaying;
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Mirror `draw()` layout: full frame -> outer block -> inner -> split into
+        // content (min) + status bar (last 2 rows).
+        let frame_area = buf.area();
+        let inner = Rect::new(
+            frame_area.x + 1,
+            frame_area.y + 1,
+            frame_area.width.saturating_sub(2),
+            frame_area.height.saturating_sub(2),
+        );
+        let content_area = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(2),
+        );
+        let text = buffer_rect_as_text(buf, content_area);
+
+        // The block title line contains box-drawing '─' characters; the historical regression
+        // was an *extra* first content line starting with "Now Playing" (no '─' in that row).
+        let duplicated_content_line = text.lines().find(|line| {
+            let l = line.trim_start_matches([' ', '│']);
+            l.starts_with("Now Playing") && !l.contains('─')
+        });
+        assert!(
+            duplicated_content_line.is_none(),
+            "regression: Now Playing content must not start with a duplicated header line; found: {:?}\nfull buffer:\n{}",
+            duplicated_content_line,
+            text
+        );
+
+        assert!(
+            text.contains("Now Playing"),
+            "test sanity: expected Now Playing title to be present in the rendered buffer"
+        );
+        assert!(
+            text.contains("Status:"),
+            "test sanity: expected Now Playing content to render a Status line; buffer was:\n{text}"
+        );
+    }
+
+    #[test]
+    fn now_playing_keys_block_uses_hotkeys_bindings_from_config() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let mut cfg = AppConfig::default();
+        cfg.hotkeys.bindings.play_pause = Some(HotkeyChord {
+            modifiers: vec![HotkeyModifier::Ctrl],
+            key: HotkeyKey::Space,
+        });
+        cfg.hotkeys.bindings.next = Some(TapHoldBinding {
+            chord: HotkeyChord {
+                modifiers: vec![HotkeyModifier::Alt],
+                key: HotkeyKey::Right,
+            },
+            hold: None,
+        });
+        cfg.hotkeys.bindings.prev = Some(TapHoldBinding {
+            chord: HotkeyChord {
+                modifiers: vec![HotkeyModifier::Shift],
+                key: HotkeyKey::Left,
+            },
+            hold: None,
+        });
+        cfg.hotkeys.bindings.shuffle_toggle = Some(HotkeyChord {
+            modifiers: vec![],
+            key: HotkeyKey::S,
+        });
+        cfg.hotkeys.bindings.repeat_toggle = None;
+
+        let mut app = TuiApp::new(paths, cfg, PlaylistsFile::default());
+        app.state.screen = Screen::NowPlaying;
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buffer_as_text(terminal.backend().buffer());
+        assert!(
+            text.contains("Ctrl+Space") && text.contains("play/pause"),
+            "expected play/pause hint to include configured binding; buffer was:\n{text}"
+        );
+        assert!(
+            text.contains("Alt+Right") && text.contains("next"),
+            "expected next hint to include configured binding; buffer was:\n{text}"
+        );
+        assert!(
+            text.contains("Shift+Left") && text.contains("previous"),
+            "expected previous hint to include configured binding; buffer was:\n{text}"
+        );
+        assert!(
+            text.contains("S") && text.contains("toggle shuffle"),
+            "expected shuffle hint to include configured binding; buffer was:\n{text}"
+        );
+        assert!(
+            text.contains("?") && text.contains("cycle repeat"),
+            "expected missing repeat binding to render as '?'; buffer was:\n{text}"
+        );
+    }
+
+    #[test]
+    fn main_menu_actions_render_in_digit_order_when_numeric_mapping_present() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let cfg = AppConfig {
+            tui: TuiConfig {
+                main_menu_numeric_mapping: Some(vec![
+                    MainMenuNumericBinding {
+                        key: 2,
+                        command: MainMenuCommand::Playlists,
+                    },
+                    MainMenuNumericBinding {
+                        key: 1,
+                        command: MainMenuCommand::AddFolder,
+                    },
+                ]),
+                extra: Default::default(),
+            },
+            ..Default::default()
+        };
+
+        let app = TuiApp::new(paths, cfg, PlaylistsFile::default());
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let text = buffer_as_text(terminal.backend().buffer());
+        let add_line = text
+            .lines()
+            .find(|l| l.contains("add folder"))
+            .expect("expected add folder line");
+        let playlists_line = text
+            .lines()
+            .find(|l| l.contains("playlists"))
+            .expect("expected playlists line");
+
+        let add_pos = text.find(add_line).unwrap();
+        let playlists_pos = text.find(playlists_line).unwrap();
+        assert!(
+            add_pos < playlists_pos,
+            "expected key 1 line (add folder) to appear before key 2 line (playlists)"
+        );
+    }
+
+    #[test]
+    fn main_menu_actions_block_renders_mapped_digit_and_alpha_hints_when_mapping_present() {
+        let cfg = AppConfig {
+            tui: TuiConfig {
+                main_menu_numeric_mapping: Some(vec![MainMenuNumericBinding {
+                    key: 1,
+                    command: MainMenuCommand::Playlists,
+                }]),
+                extra: Default::default(),
+            },
+            ..Default::default()
+        };
+
+        let s = main_menu_actions_block(&cfg);
+        assert!(
+            s.contains("Main menu (digits 1..9):\n"),
+            "expected mapped main menu header when mapping is present; got:\n{s}"
+        );
+        assert!(
+            s.contains("  1 / p  playlists"),
+            "expected mapped playlists entry to include alpha hint '/ p'; got:\n{s}"
+        );
+        assert!(
+            !s.contains("  1 / a  add folder"),
+            "regression: legacy hardcoded '1 / a add folder' must not appear when mapping is present; got:\n{s}"
         );
     }
 }

@@ -4,6 +4,7 @@ use crate::hotkeys::logic::{HotkeysEngine, KeyDirection, KeyEvent};
 use crate::tui::action::Action;
 use std::sync::mpsc;
 
+pub mod hints;
 pub mod logic;
 
 pub struct HotkeysService {

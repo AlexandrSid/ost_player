@@ -9,6 +9,14 @@ use super::AppConfig;
 const CONFIG_HELP_MARKER_LINE: &str = "# ost_player config";
 const CONFIG_HELP_HEADER: &str = r#"# ost_player config
 #
+# TUI
+# - tui.main_menu_numeric_mapping: optional numeric mapping for Main Menu digits (1..9)
+#   - if present, digits 1..9 trigger mapped commands and the main menu Actions list is rendered in 1..9 order
+#   - format: list of { key: <1..9>, command: <command_name> }
+#   - duplicates are resolved deterministically: the last entry for the same key wins
+#   - allowed commands: add_folder, remove_selected_folder, cycle_selected_folder_scan_depth,
+#     set_selected_folder_custom_min_size_kb, play, settings, playlists, rescan_library
+#
 # Audio
 # - audio.volume_default_percent: initial volume for the current app session (0..=100)
 #   - legacy alias accepted on load: audio.default_volume_percent

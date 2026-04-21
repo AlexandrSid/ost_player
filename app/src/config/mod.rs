@@ -6,6 +6,53 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum MainMenuCommand {
+    AddFolder,
+    RemoveSelectedFolder,
+    CycleSelectedFolderScanDepth,
+    SetSelectedFolderCustomMinSizeKb,
+    Play,
+    Settings,
+    Playlists,
+    RescanLibrary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MainMenuNumericBinding {
+    pub key: u8,
+    pub command: MainMenuCommand,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TuiConfig {
+    /// Optional numeric mapping for Main Menu digits (1..9).
+    ///
+    /// If present, digits are handled by this mapping and UI renders mapped commands in 1..9
+    /// order (gaps allowed). If absent, the hardcoded default mapping is used.
+    #[serde(default)]
+    pub main_menu_numeric_mapping: Option<Vec<MainMenuNumericBinding>>,
+
+    /// Preserve unknown `tui.*` fields for forward compatibility.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl TuiConfig {
+    pub fn resolved_main_menu_numeric_mapping(&self) -> Option<[Option<MainMenuCommand>; 9]> {
+        let list = self.main_menu_numeric_mapping.as_ref()?;
+        let mut out: [Option<MainMenuCommand>; 9] = [None; 9];
+        for b in list {
+            if !(1..=9).contains(&b.key) {
+                continue;
+            }
+            out[(b.key - 1) as usize] = Some(b.command);
+        }
+        Some(out)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanDepth {
@@ -489,6 +536,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
+    #[serde(default)]
+    pub tui: TuiConfig,
+
     /// Preserve unknown top-level fields when reading/writing.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -577,6 +627,17 @@ impl AppConfig {
             return Err("audio.volume_available_percent must include 0 and 100".to_string());
         }
 
+        if let Some(list) = self.tui.main_menu_numeric_mapping.as_ref() {
+            for b in list {
+                if !(1..=9).contains(&b.key) {
+                    return Err(format!(
+                        "tui.main_menu_numeric_mapping.key must be within 1..=9 (got {})",
+                        b.key
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -610,6 +671,7 @@ impl Default for AppConfig {
             hotkeys: HotkeysConfig::default(),
             audio: AudioConfig::default(),
             logging: LoggingConfig::default(),
+            tui: TuiConfig::default(),
             extra: BTreeMap::new(),
         }
     }
@@ -1027,5 +1089,39 @@ audio:
         assert_eq!(normalized.folders[0].custom_min_size_kb, None);
         assert_eq!(normalized.folders[1].custom_min_size_kb, Some(222));
         assert_eq!(normalized.folders[2].custom_min_size_kb, None);
+    }
+
+    #[test]
+    fn tui_main_menu_numeric_mapping_rejects_keys_outside_1_to_9() {
+        let cfg = AppConfig {
+            tui: TuiConfig {
+                main_menu_numeric_mapping: Some(vec![MainMenuNumericBinding {
+                    key: 0,
+                    command: MainMenuCommand::Play,
+                }]),
+                extra: Default::default(),
+            },
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn tui_main_menu_numeric_mapping_resolves_last_wins_for_duplicate_keys() {
+        let tui = TuiConfig {
+            main_menu_numeric_mapping: Some(vec![
+                MainMenuNumericBinding {
+                    key: 1,
+                    command: MainMenuCommand::AddFolder,
+                },
+                MainMenuNumericBinding {
+                    key: 1,
+                    command: MainMenuCommand::Playlists,
+                },
+            ]),
+            extra: Default::default(),
+        };
+        let resolved = tui.resolved_main_menu_numeric_mapping().unwrap();
+        assert_eq!(resolved[0], Some(MainMenuCommand::Playlists));
     }
 }

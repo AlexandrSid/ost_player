@@ -6,7 +6,7 @@ use crate::playlists::{self, Playlist};
 use crate::state as app_state_file;
 use crate::tui::action::{Action, Screen};
 use crate::tui::screens::{MainMenuScreen, NowPlayingScreen, PlaylistsScreen, SettingsScreen};
-use crate::tui::state::AppState;
+use crate::tui::state::{AppState, PlaybackSource};
 use crate::{config::AppConfig, paths::AppPaths, playlists::PlaylistsFile};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -396,10 +396,15 @@ impl TuiApp {
                 if self.scan_job.is_some() {
                     // Do not start a second scan; mark play pending and complete it right after
                     // the current scan finishes.
+                    self.state.screen = Screen::NowPlaying;
                     self.pending_play_from_library = Some(start_index);
                     self.state.status = Some("Scanning... (play pending)".to_string());
                     return Ok(());
                 }
+
+                // TZ-003: Optimistically navigate immediately. The queue will be loaded when the
+                // scan completes.
+                self.state.screen = Screen::NowPlaying;
 
                 let req =
                     self.active_folders_scan_request(ScanOrigin::PlayFromLibrary { start_index })?;
@@ -531,16 +536,15 @@ impl TuiApp {
             }
             Action::LoadPlaylist { idx } => {
                 if let Some(p) = self.state.playlists.playlists.get(idx) {
-                    let requested_is_active =
-                        self.state.playlists.active.as_deref() == Some(p.id.as_str());
                     let is_playing_or_paused =
                         self.state.player.status != crate::player::PlaybackStatus::Stopped;
-                    let folders_match_active =
-                        normalize_folders(&self.state.cfg.folders) == normalize_folders(&p.folders);
+                    let requested_source = PlaybackSource::Playlist(p.id.clone());
 
                     // Guard: if the user selects the playlist that is already playing, just
                     // navigate to Now Playing without restarting playback, queue, or rescanning.
-                    if requested_is_active && is_playing_or_paused && folders_match_active {
+                    if is_playing_or_paused
+                        && self.state.playback_source.as_ref() == Some(&requested_source)
+                    {
                         self.state.screen = Screen::NowPlaying;
                         self.state.status = None;
                         return Ok(());
@@ -634,6 +638,13 @@ impl TuiApp {
         }
         let tracks = library_tracks_to_paths(&self.state.library);
         let safe_start = clamp_start_index(start_index, tracks.len());
+
+        // TZ-004: remember how the current playback queue was created.
+        self.state.playback_source = Some(PlaybackSource::from_active_playlist_or_folders(
+            self.state.playlists.active.as_deref(),
+            &self.state.cfg.folders,
+        ));
+
         if let Some(p) = self.player.as_ref() {
             #[cfg(test)]
             {
@@ -660,7 +671,15 @@ impl TuiApp {
             return;
         }
 
-        self.state.status = Some("Scanning...".to_string());
+        // If Play triggered a scan, reflect "play pending" immediately even though we don't set
+        // `pending_play_from_library` (queue load is driven by scan origin).
+        if matches!(req.origin, ScanOrigin::PlayFromLibrary { .. })
+            || self.pending_play_from_library.is_some()
+        {
+            self.state.status = Some("Scanning... (play pending)".to_string());
+        } else {
+            self.state.status = Some("Scanning...".to_string());
+        }
         let mut job = self.scan_spawner.spawn_scan(req.folders, req.opts);
         job.origin = req.origin;
         self.scan_job = Some(job);
@@ -845,17 +864,6 @@ impl TuiApp {
         };
         p.shutdown_and_join(timeout)
     }
-}
-
-fn normalize_folders(folders: &[FolderEntry]) -> Vec<FolderEntry> {
-    let mut seen = std::collections::BTreeSet::<String>::new();
-    let mut out = Vec::with_capacity(folders.len());
-    for f in folders {
-        if seen.insert(f.path.clone()) {
-            out.push(f.clone());
-        }
-    }
-    out
 }
 
 fn playlist_id(name: &str) -> String {
@@ -1654,6 +1662,58 @@ mod tests {
         app.state.screen = Screen::Playlists;
         app.state.playlists.active = Some("p1".to_string());
         app.state.player.status = PlaybackStatus::Playing;
+        app.state.playback_source = Some(PlaybackSource::Playlist("p1".to_string()));
+        let before_cfg_writes = mock.config_writes();
+        let before_pls_writes = mock.playlists_writes();
+        let before_load_queue_commands_sent = app.load_queue_commands_sent;
+
+        app.apply(Action::LoadPlaylist { idx: 0 }).unwrap();
+
+        assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(mock.config_writes(), before_cfg_writes);
+        assert_eq!(mock.playlists_writes(), before_pls_writes);
+        assert_eq!(app.state.status, None);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "guard should not emit any PlayerCommand (no Stop/LoadQueue/etc)"
+        );
+        assert!(
+            app.scan_job.is_none() && app.pending_scan.is_none(),
+            "guard should not start or queue a scan"
+        );
+        assert_eq!(
+            app.load_queue_commands_sent, before_load_queue_commands_sent,
+            "guard should not load/reload queue"
+        );
+    }
+
+    #[test]
+    fn tz_004_guard_triggers_when_same_playlist_and_player_paused() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+        let music_dir = td.path().join("music_a");
+        std::fs::create_dir_all(&music_dir).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new(music_dir.to_string_lossy().to_string())];
+
+        let mut pls = PlaylistsFile::default();
+        pls.playlists.push(Playlist {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            folders: vec![FolderEntry::new(music_dir.to_string_lossy().to_string())],
+            extra: Default::default(),
+        });
+
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::Playlists;
+        app.state.playlists.active = Some("p1".to_string());
+        app.state.player.status = PlaybackStatus::Paused;
+        app.state.playback_source = Some(PlaybackSource::Playlist("p1".to_string()));
         let before_cfg_writes = mock.config_writes();
         let before_pls_writes = mock.playlists_writes();
         let before_load_queue_commands_sent = app.load_queue_commands_sent;
@@ -1769,6 +1829,7 @@ mod tests {
         app.state.screen = Screen::Playlists;
         app.state.playlists.active = Some("p1".to_string());
         app.state.player.status = PlaybackStatus::Playing;
+        app.state.playback_source = Some(PlaybackSource::FoldersHash(123));
 
         let before_cfg_writes = mock.config_writes();
         let before_pls_writes = mock.playlists_writes();
@@ -1785,6 +1846,134 @@ mod tests {
 
         // Because playback was active, it should have stopped playback.
         assert_eq!(cmd_rx.try_recv().unwrap(), PlayerCommand::Stop);
+    }
+
+    #[test]
+    fn tz_004_guard_does_not_trigger_when_playback_source_differs_even_if_paused() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let a_dir = td.path().join("A");
+        let b_dir = td.path().join("B");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new(a_dir.to_string_lossy().to_string())];
+
+        let mut pls = PlaylistsFile::default();
+        pls.playlists.push(Playlist {
+            id: "p1".to_string(),
+            name: "Playlist".to_string(),
+            folders: vec![FolderEntry::new(b_dir.to_string_lossy().to_string())],
+            extra: Default::default(),
+        });
+
+        let (mut app, mock) = app_with_mock(paths, cfg, pls);
+
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        app.state.screen = Screen::Playlists;
+        app.state.playlists.active = Some("p1".to_string());
+        app.state.player.status = PlaybackStatus::Paused;
+        // Different source => guard must NOT trigger.
+        app.state.playback_source = Some(PlaybackSource::FoldersHash(123));
+
+        let before_cfg_writes = mock.config_writes();
+        let before_pls_writes = mock.playlists_writes();
+
+        app.apply(Action::LoadPlaylist { idx: 0 }).unwrap();
+
+        assert_eq!(
+            app.state.cfg.folders,
+            vec![FolderEntry::new(b_dir.to_string_lossy().to_string())]
+        );
+        assert_eq!(app.state.playlists.active.as_deref(), Some("p1"));
+        assert_eq!(mock.config_writes(), before_cfg_writes + 1);
+        assert_eq!(mock.playlists_writes(), before_pls_writes + 1);
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            PlayerCommand::Stop,
+            "paused is still active playback; normal path should stop playback"
+        );
+    }
+
+    #[test]
+    fn tz_004_load_queue_sets_playback_source_to_playlist_when_active_playlist_is_set() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![FolderEntry::new("A".to_string())];
+
+        let mut pls = PlaylistsFile::default();
+        pls.active = Some("p1".to_string());
+
+        let (mut app, _mock) = app_with_mock(paths, cfg, pls);
+
+        // Replace the real player handle with a controllable one (queue load will emit a command).
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        // Provide a non-empty library so load_queue_from_current_library proceeds.
+        app.state.library.tracks = vec![TrackEntry {
+            id: TrackId(1),
+            path: std::path::PathBuf::from("A.ogg"),
+            rel_path: None,
+            size_bytes: 1,
+        }];
+
+        app.load_queue_from_current_library(0);
+
+        assert_eq!(
+            app.state.playback_source,
+            Some(PlaybackSource::Playlist("p1".to_string()))
+        );
+    }
+
+    #[test]
+    fn tz_004_load_queue_sets_playback_source_to_folders_hash_when_no_active_playlist() {
+        let td = tempfile::tempdir().unwrap();
+        let paths = paths_for(td.path());
+
+        let mut cfg = AppConfig::default();
+        cfg.folders = vec![
+            FolderEntry::new("A".to_string()),
+            FolderEntry::new("A".to_string()), // duplicates should not affect identity
+            FolderEntry::new("B".to_string()),
+        ];
+
+        let pls = PlaylistsFile::default();
+        let (mut app, _mock) = app_with_mock(paths, cfg, pls);
+
+        // Replace the real player handle with a controllable one (queue load will emit a command).
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<PlayerCommand>();
+        let (_evt_tx, evt_rx) = mpsc::channel::<PlayerEvent>();
+        app.player = Some(PlayerHandle::new_for_test(cmd_tx, evt_rx));
+
+        // Provide a non-empty library so load_queue_from_current_library proceeds.
+        app.state.library.tracks = vec![TrackEntry {
+            id: TrackId(1),
+            path: std::path::PathBuf::from("A.ogg"),
+            rel_path: None,
+            size_bytes: 1,
+        }];
+
+        app.load_queue_from_current_library(0);
+
+        let expected =
+            PlaybackSource::from_active_playlist_or_folders(None, &app.state.cfg.folders);
+        assert_eq!(app.state.playback_source, Some(expected));
+        assert!(
+            matches!(
+                app.state.playback_source,
+                Some(PlaybackSource::FoldersHash(_))
+            ),
+            "expected folders-hash source when no active playlist"
+        );
     }
 
     #[test]
@@ -1889,7 +2078,16 @@ mod tests {
             .unwrap();
         assert!(app.scan_job.is_some(), "Play should start a scan when idle");
         assert_eq!(app.pending_play_from_library, None);
-        assert_eq!(app.state.screen, Screen::MainMenu);
+        assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(
+            app.state.status.as_deref(),
+            Some("Scanning... (play pending)"),
+            "TZ-003: Play should show play-pending status while scan is running"
+        );
+        assert_eq!(
+            app.load_queue_commands_sent, 0,
+            "queue must not be loaded until scan completes"
+        );
 
         // The scan job should be tagged with the Play origin so apply_scan_result loads the queue.
         assert_eq!(
@@ -1912,12 +2110,24 @@ mod tests {
         assert!(app.scan_job.is_none());
         assert_eq!(app.pending_play_from_library, None);
         assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(
+            app.load_queue_commands_sent, 1,
+            "TZ-003: queue should be loaded exactly once after scan completes"
+        );
+        assert_eq!(
+            app.state.status, None,
+            "status should be cleared after queue load"
+        );
 
         // Drive one more tick to ensure we don't "load again" from stale pending state.
         let _ = app.tick().unwrap();
         assert!(app.scan_job.is_none());
         assert_eq!(app.pending_play_from_library, None);
         assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(
+            app.load_queue_commands_sent, 1,
+            "regression: must not load queue again on subsequent ticks"
+        );
     }
 
     #[test]
@@ -1960,6 +2170,20 @@ mod tests {
             "Play during scan must not replace the active scan origin"
         );
         assert_eq!(app.pending_play_from_library, Some(0));
+        assert_eq!(
+            app.state.screen,
+            Screen::NowPlaying,
+            "TZ-003: should navigate to NowPlaying immediately even if scan already running"
+        );
+        assert_eq!(
+            app.state.status.as_deref(),
+            Some("Scanning... (play pending)"),
+            "TZ-003: status must include '(play pending)' when Play is pressed during an active scan"
+        );
+        assert_eq!(
+            app.load_queue_commands_sent, 0,
+            "queue must not be loaded until scan completes"
+        );
 
         // Complete the scan.
         let mut lib = LibraryIndex::default();
@@ -1977,12 +2201,24 @@ mod tests {
         assert_eq!(app.pending_play_from_library, None);
         assert!(app.scan_job.is_none());
         assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(
+            app.load_queue_commands_sent, 1,
+            "TZ-003: queue should be loaded after scan completes"
+        );
+        assert_eq!(
+            app.state.status, None,
+            "status should be cleared after queue load"
+        );
 
         // And ensure it does not re-apply on subsequent ticks.
         let _ = app.tick().unwrap();
         assert_eq!(app.pending_play_from_library, None);
         assert!(app.scan_job.is_none());
         assert_eq!(app.state.screen, Screen::NowPlaying);
+        assert_eq!(
+            app.load_queue_commands_sent, 1,
+            "regression: must not load queue again on subsequent ticks"
+        );
     }
 
     #[test]
